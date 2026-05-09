@@ -78,7 +78,7 @@ class PatternTaskStats(BaseModel):
 
 
 class PatternScreeningTask(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, arbitrary_types_allowed=True)
 
     id: Optional[PyObjectId] = Field(default_factory=PyObjectId, alias="_id")
     task_id: str

@@ -196,12 +196,17 @@ async def init_database():
         mongo_client = db_manager.mongo_client
         mongo_db = db_manager.mongo_db
 
-        # 初始化Redis
-        await db_manager.init_redis()
-        redis_client = db_manager.redis_client
-        redis_pool = db_manager.redis_pool
-
-        logger.info("🎉 所有数据库连接初始化完成")
+        # 初始化Redis（开发环境允许降级：Redis 启动失败不阻断后端启动）
+        try:
+            await db_manager.init_redis()
+            redis_client = db_manager.redis_client
+            redis_pool = db_manager.redis_pool
+            logger.info("🎉 MongoDB + Redis 连接初始化完成")
+        except Exception as e:
+            logger.warning(f"⚠️ Redis 初始化失败，将以无 Redis 模式继续运行: {e}")
+            redis_client = None
+            redis_pool = None
+            logger.info("🎉 MongoDB 连接初始化完成（Redis 未启用）")
 
         # 🔥 初始化数据库视图和索引
         await init_database_views_and_indexes()
