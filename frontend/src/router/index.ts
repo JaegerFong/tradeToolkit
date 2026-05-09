@@ -93,6 +93,32 @@ const routes: RouteRecordRaw[] = [
   },
 
   {
+    path: '/pattern-screening',
+    name: 'PatternScreening',
+    component: () => import('@/layouts/BasicLayout.vue'),
+    meta: {
+      title: '技术形态选股',
+      icon: 'Search',
+      requiresAuth: true,
+      transition: 'slide-up'
+    },
+    children: [
+      {
+        path: '',
+        name: 'PatternScreeningHome',
+        component: () => import('@/views/PatternScreening/index.vue'),
+        meta: { title: '技术形态选股', requiresAuth: true }
+      },
+      {
+        path: 'tasks/:taskId',
+        name: 'PatternScreeningTaskDetail',
+        component: () => import('@/views/PatternScreening/TaskDetail.vue'),
+        meta: { title: '选股任务详情', requiresAuth: true, hideInMenu: true }
+      }
+    ]
+  },
+
+  {
     path: '/favorites',
     name: 'Favorites',
     component: () => import('@/layouts/BasicLayout.vue'),

@@ -37,6 +37,11 @@
       <template #title>股票筛选</template>
     </el-menu-item>
 
+    <el-menu-item index="/pattern-screening">
+      <el-icon><Search /></el-icon>
+      <template #title>技术形态选股</template>
+    </el-menu-item>
+
     <el-menu-item index="/favorites">
       <el-icon><Star /></el-icon>
       <template #title>我的自选股</template>

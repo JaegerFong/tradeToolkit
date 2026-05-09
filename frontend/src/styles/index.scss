@@ -11,9 +11,17 @@ html, body {
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
 }
 
-// 优化标题样式（浅色主题）
+// 全局主题变量（用于统一 UI 风格）
+:root {
+  --tt-page-max-width: 1400px;
+  --tt-card-radius: 14px;
+  --tt-card-border: var(--el-border-color-lighter);
+  --tt-page-gap: 16px;
+}
+
+// 优化标题样式（统一走 Element Plus 文本变量）
 h1, h2, h3, h4, h5, h6 {
-  color: #1a202c;
+  color: var(--el-text-color-primary);
   font-weight: 600;
 }
 
@@ -44,7 +52,7 @@ h6 {
 // 优化卡片标题
 .el-card__header {
   h1, h2, h3, h4, h5, h6 {
-    color: #1a202c;
+    color: var(--el-text-color-primary);
     font-weight: 600;
     margin: 0;
   }
@@ -54,8 +62,35 @@ h6 {
 .page-title,
 .section-title,
 .card-title {
-  color: #1a202c !important;
+  color: var(--el-text-color-primary) !important;
   font-weight: 600 !important;
+}
+
+// 页面头部统一风格（多页面复用）
+.page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: var(--tt-page-gap);
+
+  .page-title {
+    margin: 0 0 6px 0;
+    line-height: 1.2;
+  }
+
+  .page-description {
+    margin: 0;
+    color: var(--el-text-color-secondary);
+    font-size: 13px;
+    line-height: 1.6;
+  }
+}
+
+// 统一卡片圆角（更接近“工作台”风格）
+.el-card {
+  border-radius: var(--tt-card-radius);
+  border-color: var(--tt-card-border);
 }
 
 // 全局工具类
