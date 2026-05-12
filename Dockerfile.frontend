@@ -2,7 +2,10 @@
 # 前后端分离架构 - 前端服务
 
 # 构建阶段：使用Node.js 22.x（与项目开发环境一致）
-FROM node:22-alpine AS build
+# 可通过 build args 切换基础镜像源，解决 Docker Hub 网络超时
+ARG NODE_BASE_IMAGE=node:22-alpine
+ARG NGINX_BASE_IMAGE=nginx:alpine
+FROM ${NODE_BASE_IMAGE} AS build
 
 ENV NODE_ENV=production
 WORKDIR /app/frontend
@@ -30,7 +33,7 @@ COPY docs /app/docs
 RUN yarn vite build
 
 # 运行阶段：使用Nginx提供静态文件服务
-FROM nginx:alpine AS runtime
+FROM ${NGINX_BASE_IMAGE} AS runtime
 
 WORKDIR /usr/share/nginx/html
 

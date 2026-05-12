@@ -42,6 +42,11 @@
       <template #title>技术形态选股</template>
     </el-menu-item>
 
+    <el-menu-item index="/strategies">
+      <el-icon><DataAnalysis /></el-icon>
+      <template #title>策略工具</template>
+    </el-menu-item>
+
     <el-menu-item index="/favorites">
       <el-icon><Star /></el-icon>
       <template #title>我的自选股</template>
@@ -112,6 +117,7 @@ import {
   Reading,
   TrendCharts,
   Search,
+  DataAnalysis,
   Star,
   List,
   /* Document 移除：不再使用顶级分析报告菜单图标 */

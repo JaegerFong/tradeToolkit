@@ -28,7 +28,7 @@ from pathlib import Path
 from app.core.config import settings
 from app.core.database import init_db, close_db
 from app.core.logging_config import setup_logging
-from app.routers import auth_db as auth, analysis, screening, pattern_screening, queue, sse, health, favorites, config, reports, database, operation_logs, tags, tushare_init, akshare_init, baostock_init, historical_data, multi_period_sync, financial_data, news_data, social_media, internal_messages, usage_statistics, model_capabilities, cache, logs
+from app.routers import auth_db as auth, analysis, screening, pattern_screening, strategies, queue, sse, health, favorites, config, reports, database, operation_logs, tags, tushare_init, akshare_init, baostock_init, historical_data, multi_period_sync, financial_data, news_data, social_media, internal_messages, usage_statistics, model_capabilities, cache, logs
 from app.routers import sync as sync_router, multi_source_sync
 from app.routers import stocks as stocks_router
 from app.routers import stock_data as stock_data_router
@@ -569,6 +569,21 @@ async def lifespan(app: FastAPI):
         else:
             logger.info(f"📰 新闻数据同步已配置（仅自选股）: {settings.NEWS_SYNC_CRON}")
 
+        # 策略每日任务：按每个启用策略自己的 cron 注册，并定期同步新增/启停变更。
+        from app.services.strategy_task_service import register_enabled_strategy_jobs
+
+        async def reconcile_strategy_jobs():
+            await register_enabled_strategy_jobs(scheduler, settings.TIMEZONE)
+
+        await register_enabled_strategy_jobs(scheduler, settings.TIMEZONE)
+        scheduler.add_job(
+            reconcile_strategy_jobs,
+            IntervalTrigger(minutes=10, timezone=settings.TIMEZONE),
+            id="strategy_jobs_reconcile",
+            name="策略定时任务同步"
+        )
+        logger.info("📈 策略定时任务已按启用策略配置完成")
+
         scheduler.start()
 
         # 设置调度器实例到服务中，以便API可以管理任务
@@ -689,6 +704,7 @@ app.include_router(analysis.router, prefix="/api/analysis", tags=["analysis"])
 app.include_router(reports.router, tags=["reports"])
 app.include_router(screening.router, prefix="/api/screening", tags=["screening"])
 app.include_router(pattern_screening.router, prefix="/api", tags=["pattern_screening"])
+app.include_router(strategies.router, prefix="/api", tags=["strategies"])
 app.include_router(queue.router, prefix="/api/queue", tags=["queue"])
 app.include_router(favorites.router, prefix="/api", tags=["favorites"])
 app.include_router(stocks_router.router, prefix="/api", tags=["stocks"])

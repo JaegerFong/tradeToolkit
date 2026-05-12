@@ -22,12 +22,35 @@ FRONTEND_IMAGE="tradingagents-frontend-arm64"
 # 目标架构
 PLATFORM="linux/arm64"
 
+# 基础镜像。Docker Hub 网络不稳定时，可以通过环境变量切换到镜像源。
+PYTHON_BASE_IMAGE="${PYTHON_BASE_IMAGE:-python:3.10-slim-bookworm}"
+NODE_BASE_IMAGE="${NODE_BASE_IMAGE:-node:22-alpine}"
+NGINX_BASE_IMAGE="${NGINX_BASE_IMAGE:-nginx:alpine}"
+
+print_build_failure_help() {
+    echo ""
+    echo -e "${YELLOW}排查建议:${NC}"
+    echo -e "${YELLOW}1. 如果错误停在 load metadata / failed to fetch oauth token，说明 Docker Hub 连接超时。${NC}"
+    echo -e "${YELLOW}   可重试，或临时切换基础镜像源后再构建，例如:${NC}"
+    echo ""
+    echo -e "  PYTHON_BASE_IMAGE=registry.cn-hangzhou.aliyuncs.com/library/python:3.10-slim-bookworm \\"
+    echo -e "  NODE_BASE_IMAGE=registry.cn-hangzhou.aliyuncs.com/library/node:22-alpine \\"
+    echo -e "  NGINX_BASE_IMAGE=registry.cn-hangzhou.aliyuncs.com/library/nginx:alpine \\"
+    echo -e "  VERSION=${VERSION} ./scripts/build-arm64.sh"
+    echo ""
+    echo -e "${YELLOW}2. 如果错误是 COPY xxx not found，说明构建上下文缺少文件或被 .dockerignore 排除了。${NC}"
+    echo -e "${YELLOW}3. 也可以在 Docker Desktop -> Settings -> Docker Engine 配置 registry-mirrors。${NC}"
+}
+
 echo -e "${BLUE}========================================${NC}"
 echo -e "${BLUE}tradeToolkit ARM64 镜像构建${NC}"
 echo -e "${BLUE}========================================${NC}"
 echo ""
 echo -e "${GREEN}版本: ${VERSION}${NC}"
 echo -e "${GREEN}架构: ${PLATFORM}${NC}"
+echo -e "${GREEN}Python基础镜像: ${PYTHON_BASE_IMAGE}${NC}"
+echo -e "${GREEN}Node基础镜像: ${NODE_BASE_IMAGE}${NC}"
+echo -e "${GREEN}Nginx基础镜像: ${NGINX_BASE_IMAGE}${NC}"
 echo -e "${GREEN}适用: ARM 服务器、树莓派、NVIDIA Jetson${NC}"
 if [ -n "$REGISTRY" ]; then
     echo -e "${GREEN}仓库: ${REGISTRY}${NC}"
@@ -83,7 +106,7 @@ if [ -n "$REGISTRY" ]; then
     BACKEND_TAG="${REGISTRY}/${BACKEND_TAG}"
 fi
 
-BUILD_ARGS="--platform ${PLATFORM} -f Dockerfile.backend -t ${BACKEND_TAG}"
+BUILD_ARGS="--platform ${PLATFORM} --build-arg PYTHON_BASE_IMAGE=${PYTHON_BASE_IMAGE} -f Dockerfile.backend -t ${BACKEND_TAG}"
 
 if [ -n "$REGISTRY" ]; then
     # 推送到远程仓库
@@ -103,14 +126,12 @@ fi
 BUILD_ARGS="${BUILD_ARGS} -t ${BACKEND_TAG_LATEST}"
 
 echo -e "${BLUE}构建命令: docker buildx build ${BUILD_ARGS} .${NC}"
-docker buildx build $BUILD_ARGS .
-
-if [ $? -eq 0 ]; then
-    echo -e "${GREEN}✅ 后端镜像构建成功${NC}"
-else
+if ! docker buildx build $BUILD_ARGS .; then
     echo -e "${RED}❌ 后端镜像构建失败${NC}"
+    print_build_failure_help
     exit 1
 fi
+echo -e "${GREEN}✅ 后端镜像构建成功${NC}"
 
 # 构建前端镜像
 echo ""
@@ -120,7 +141,7 @@ if [ -n "$REGISTRY" ]; then
     FRONTEND_TAG="${REGISTRY}/${FRONTEND_TAG}"
 fi
 
-BUILD_ARGS="--platform ${PLATFORM} -f Dockerfile.frontend -t ${FRONTEND_TAG}"
+BUILD_ARGS="--platform ${PLATFORM} --build-arg NODE_BASE_IMAGE=${NODE_BASE_IMAGE} --build-arg NGINX_BASE_IMAGE=${NGINX_BASE_IMAGE} -f Dockerfile.frontend -t ${FRONTEND_TAG}"
 
 if [ -n "$REGISTRY" ]; then
     # 推送到远程仓库
@@ -140,14 +161,12 @@ fi
 BUILD_ARGS="${BUILD_ARGS} -t ${FRONTEND_TAG_LATEST}"
 
 echo -e "${BLUE}构建命令: docker buildx build ${BUILD_ARGS} .${NC}"
-docker buildx build $BUILD_ARGS .
-
-if [ $? -eq 0 ]; then
-    echo -e "${GREEN}✅ 前端镜像构建成功${NC}"
-else
+if ! docker buildx build $BUILD_ARGS .; then
     echo -e "${RED}❌ 前端镜像构建失败${NC}"
+    print_build_failure_help
     exit 1
 fi
+echo -e "${GREEN}✅ 前端镜像构建成功${NC}"
 
 # 构建完成
 echo ""
@@ -204,4 +223,3 @@ echo -e "${YELLOW}5. 性能优化建议:${NC}"
 echo -e "   - ARM 设备构建较慢，建议使用预构建镜像"
 echo -e "   - 或在 x86 机器上交叉编译后推送到仓库"
 echo ""
-

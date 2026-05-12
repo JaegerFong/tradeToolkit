@@ -119,6 +119,26 @@ const routes: RouteRecordRaw[] = [
   },
 
   {
+    path: '/strategies',
+    name: 'Strategies',
+    component: () => import('@/layouts/BasicLayout.vue'),
+    meta: {
+      title: '策略工具',
+      icon: 'DataAnalysis',
+      requiresAuth: true,
+      transition: 'slide-up'
+    },
+    children: [
+      {
+        path: '',
+        name: 'StrategiesHome',
+        component: () => import('@/views/Strategies/index.vue'),
+        meta: { title: '策略工具', requiresAuth: true }
+      }
+    ]
+  },
+
+  {
     path: '/favorites',
     name: 'Favorites',
     component: () => import('@/layouts/BasicLayout.vue'),
