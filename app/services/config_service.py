@@ -19,7 +19,11 @@ from app.models.config import (
     ModelProvider, DataSourceType, DatabaseType, LLMProvider,
     MarketCategory, DataSourceGrouping, ModelCatalog, ModelInfo
 )
-from tradingagents.llm_clients.provider_keys import canonical_aliases, normalize_provider_key
+try:
+    from tradingagents.llm_clients.provider_keys import canonical_aliases, normalize_provider_key
+except ImportError:
+    canonical_aliases = {}
+    def normalize_provider_key(k): return k
 
 logger = logging.getLogger(__name__)
 

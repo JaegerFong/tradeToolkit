@@ -445,6 +445,187 @@ async def get_sync_history(
         raise HTTPException(status_code=500, detail=f"Failed to get sync history: {str(e)}")
 
 
+@router.get("/stock-coverage")
+async def get_stock_sync_coverage(
+    page: int = Query(1, ge=1, description="页码"),
+    page_size: int = Query(20, ge=1, le=100, description="每页大小"),
+    keyword: Optional[str] = Query(None, description="股票代码或名称关键字"),
+    source: Optional[str] = Query(None, description="基础信息数据源筛选")
+):
+    """获取已同步股票列表及每只股票的数据覆盖情况。"""
+    try:
+        from app.core.database import get_mongo_db
+
+        db = get_mongo_db()
+        query: Dict[str, Any] = {}
+        if keyword:
+            query["$or"] = [
+                {"code": {"$regex": keyword, "$options": "i"}},
+                {"symbol": {"$regex": keyword, "$options": "i"}},
+                {"name": {"$regex": keyword, "$options": "i"}},
+            ]
+        if source:
+            query["$and"] = query.get("$and", []) + [
+                {"$or": [{"source": source}, {"data_source": source}]}
+            ]
+
+        skip = (page - 1) * page_size
+        total = await db.stock_basic_info.count_documents(query)
+
+        basic_docs = await db.stock_basic_info.find(
+            query,
+            {
+                "_id": 0,
+                "code": 1,
+                "symbol": 1,
+                "name": 1,
+                "industry": 1,
+                "market": 1,
+                "source": 1,
+                "data_source": 1,
+                "updated_at": 1,
+                "last_sync": 1,
+            },
+        ).sort("code", 1).skip(skip).limit(page_size).to_list(length=page_size)
+
+        codes = [doc.get("code") or doc.get("symbol") for doc in basic_docs]
+        codes = [str(code).zfill(6) for code in codes if code]
+
+        historical_map: Dict[str, Dict[str, Any]] = {}
+        if codes:
+            rows = await db.stock_daily_quotes.aggregate([
+                {"$match": {"symbol": {"$in": codes}}},
+                {
+                    "$group": {
+                        "_id": {"symbol": "$symbol", "period": "$period"},
+                        "count": {"$sum": 1},
+                        "earliest_trade_date": {"$min": "$trade_date"},
+                        "latest_trade_date": {"$max": "$trade_date"},
+                        "latest_update": {"$max": "$updated_at"},
+                        "sources": {"$addToSet": "$data_source"},
+                    }
+                },
+            ]).to_list(length=None)
+            for row in rows:
+                symbol = row["_id"]["symbol"]
+                period = row["_id"].get("period") or "daily"
+                historical_map.setdefault(symbol, {})[period] = {
+                    "count": row.get("count", 0),
+                    "earliest_trade_date": row.get("earliest_trade_date"),
+                    "latest_trade_date": row.get("latest_trade_date"),
+                    "latest_update": row.get("latest_update"),
+                    "sources": row.get("sources", []),
+                }
+
+        financial_map: Dict[str, Dict[str, Any]] = {}
+        if codes:
+            rows = await db.stock_financial_data.aggregate([
+                {"$match": {"$or": [{"code": {"$in": codes}}, {"symbol": {"$in": codes}}]}},
+                {"$addFields": {"coverage_code": {"$ifNull": ["$code", "$symbol"]}}},
+                {
+                    "$group": {
+                        "_id": "$coverage_code",
+                        "count": {"$sum": 1},
+                        "latest_report_period": {"$max": "$report_period"},
+                        "latest_update": {"$max": "$updated_at"},
+                        "sources": {"$addToSet": "$data_source"},
+                    }
+                },
+            ]).to_list(length=None)
+            financial_map = {
+                row["_id"]: {
+                    "count": row.get("count", 0),
+                    "latest_report_period": row.get("latest_report_period"),
+                    "latest_update": row.get("latest_update"),
+                    "sources": row.get("sources", []),
+                }
+                for row in rows
+                if row.get("_id")
+            }
+
+        quote_map: Dict[str, Dict[str, Any]] = {}
+        if codes:
+            quotes = await db.market_quotes.find(
+                {"code": {"$in": codes}},
+                {"_id": 0, "code": 1, "trade_date": 1, "updated_at": 1, "data_source": 1, "source": 1},
+            ).to_list(length=None)
+            quote_map = {
+                item["code"]: {
+                    "exists": True,
+                    "trade_date": item.get("trade_date"),
+                    "latest_update": item.get("updated_at"),
+                    "source": item.get("data_source") or item.get("source"),
+                }
+                for item in quotes
+                if item.get("code")
+            }
+
+        items = []
+        for doc in basic_docs:
+            code = str(doc.get("code") or doc.get("symbol") or "").zfill(6)
+            items.append({
+                "code": code,
+                "name": doc.get("name"),
+                "industry": doc.get("industry"),
+                "market": doc.get("market"),
+                "basic": {
+                    "exists": True,
+                    "source": doc.get("source") or doc.get("data_source"),
+                    "latest_update": doc.get("updated_at") or doc.get("last_sync"),
+                },
+                "historical": historical_map.get(code, {}),
+                "financial": financial_map.get(code, {"count": 0, "sources": []}),
+                "quotes": quote_map.get(code, {"exists": False}),
+            })
+
+        summary_rows = await db.stock_daily_quotes.aggregate([
+            {
+                "$group": {
+                    "_id": "$period",
+                    "symbol_count": {"$addToSet": "$symbol"},
+                    "record_count": {"$sum": 1},
+                    "earliest_trade_date": {"$min": "$trade_date"},
+                    "latest_trade_date": {"$max": "$trade_date"},
+                }
+            },
+            {
+                "$project": {
+                    "_id": 0,
+                    "period": "$_id",
+                    "symbol_count": {"$size": "$symbol_count"},
+                    "record_count": 1,
+                    "earliest_trade_date": 1,
+                    "latest_trade_date": 1,
+                }
+            },
+            {"$sort": {"period": 1}},
+        ]).to_list(length=None)
+
+        financial_symbols = await db.stock_financial_data.distinct("code")
+        quote_count = await db.market_quotes.count_documents({})
+
+        return SyncResponse(
+            success=True,
+            message="Stock sync coverage retrieved successfully",
+            data={
+                "items": items,
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+                "has_more": skip + len(items) < total,
+                "summary": {
+                    "basic_stock_count": total,
+                    "historical_by_period": summary_rows,
+                    "financial_stock_count": len([code for code in financial_symbols if code]),
+                    "quote_stock_count": quote_count,
+                },
+            },
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get stock sync coverage: {str(e)}")
+
+
 @router.delete("/cache")
 async def clear_sync_cache():
     """清空同步相关的缓存"""

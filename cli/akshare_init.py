@@ -30,6 +30,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# 初始化 AKShare 网络层 (代理池 / 限速 / 浏览器指纹)
+# 必须在任何 akshare 调用前执行
+try:
+    from tradingagents.dataflows.providers.china.akshare_network import init_akshare_network
+    init_akshare_network()
+    logger.info("AKShare 网络层已初始化")
+except Exception as e:
+    logger.warning(f"AKShare 网络层初始化失败 (将使用直连): {e}")
+
 
 async def check_database_status():
     """检查数据库状态"""
@@ -291,6 +300,7 @@ async def main():
     
     print("🚀 AKShare数据初始化工具")
     print(f"⏰ 开始时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    success = True
 
     try:
         # 初始化数据库连接
@@ -298,8 +308,6 @@ async def main():
         await init_database()
         print("✅ 数据库连接成功")
         print()
-
-        success = True
 
         # 检查数据库状态
         if args.check_only:

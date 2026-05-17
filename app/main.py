@@ -28,16 +28,12 @@ from pathlib import Path
 from app.core.config import settings
 from app.core.database import init_db, close_db
 from app.core.logging_config import setup_logging
-from app.routers import auth_db as auth, analysis, screening, pattern_screening, strategies, queue, sse, health, favorites, config, reports, database, operation_logs, tags, tushare_init, akshare_init, baostock_init, historical_data, multi_period_sync, financial_data, news_data, social_media, internal_messages, usage_statistics, model_capabilities, cache, logs
+from app.routers import auth_db as auth, pattern_screening, strategies, queue, sse, health, config, database, operation_logs, tushare_init, akshare_init, historical_data, multi_period_sync, financial_data, news_data, usage_statistics, model_capabilities, cache, logs
 from app.routers import sync as sync_router, multi_source_sync
 from app.routers import stocks as stocks_router
 from app.routers import stock_data as stock_data_router
 from app.routers import stock_sync as stock_sync_router
-from app.routers import multi_market_stocks as multi_market_stocks_router
-from app.routers import notifications as notifications_router
-from app.routers import websocket_notifications as websocket_notifications_router
 from app.routers import scheduler as scheduler_router
-from app.services.basics_sync_service import get_basics_sync_service
 from app.services.multi_source_basics_sync_service import MultiSourceBasicsSyncService
 from app.services.scheduler_service import set_scheduler_instance
 from app.worker.tushare_sync_service import (
@@ -54,21 +50,11 @@ from app.worker.akshare_sync_service import (
     run_akshare_financial_sync,
     run_akshare_status_check
 )
-from app.worker.baostock_sync_service import (
-    run_baostock_basic_info_sync,
-    run_baostock_daily_quotes_sync,
-    run_baostock_historical_sync,
-    run_baostock_status_check
-)
-# 港股和美股改为按需获取+缓存模式，不再需要定时同步任务
-# from app.worker.hk_sync_service import ...
-# from app.worker.us_sync_service import ...
 from app.middleware.operation_log_middleware import OperationLogMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from app.services.quotes_ingestion_service import QuotesIngestionService
-from app.routers import paper as paper_router
 
 
 def get_version() -> str:
@@ -253,6 +239,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logging.getLogger("webapi").warning(f"Failed to apply dynamic settings: {e}")
 
+    # 初始化 AKShare 网络层 (代理池 / 限速 / 浏览器指纹)
+    # 必须在任何 akshare 调用前执行, 确保所有东方财富请求经过代理轮转
+    try:
+        from tradingagents.dataflows.providers.china.akshare_network import init_akshare_network
+        init_akshare_network()
+        logger.info("AKShare 网络层已就绪")
+    except Exception as e:
+        logger.warning(f"AKShare 网络层初始化失败: {e}")
+
     # 显示配置摘要
     await _print_config_summary(logger)
 
@@ -280,23 +275,22 @@ async def lifespan(app: FastAPI):
         multi_source_service = MultiSourceBasicsSyncService()
 
         # 根据 TUSHARE_ENABLED 配置决定优先数据源
-        # 如果 Tushare 被禁用，系统会自动使用其他可用数据源（AKShare/BaoStock）
         preferred_sources = None  # None 表示使用默认优先级顺序
 
         if settings.TUSHARE_ENABLED:
-            # Tushare 启用时，优先使用 Tushare
-            preferred_sources = ["tushare", "akshare", "baostock"]
-            logger.info(f"📊 股票基础信息同步优先数据源: Tushare > AKShare > BaoStock")
+            preferred_sources = ["tushare", "akshare"]
+            logger.info(f"📊 基础信息同步优先数据源: Tushare > AKShare")
         else:
-            # Tushare 禁用时，使用 AKShare 和 BaoStock
-            preferred_sources = ["akshare", "baostock"]
-            logger.info(f"📊 股票基础信息同步优先数据源: AKShare > BaoStock (Tushare已禁用)")
+            preferred_sources = ["akshare"]
+            logger.info(f"📊 基础信息同步优先数据源: AKShare (Tushare已禁用)")
 
-        # 立即在启动后尝试一次（不阻塞）
-        async def run_sync_with_sources():
-            await multi_source_service.run_full_sync(force=False, preferred_sources=preferred_sources)
+        # 立即在启动后尝试一次（不阻塞）；本地调试可用
+        # SYNC_STOCK_BASICS_ENABLED=false 完全关闭启动同步和定时同步。
+        if settings.SYNC_STOCK_BASICS_ENABLED:
+            async def run_sync_with_sources():
+                await multi_source_service.run_full_sync(force=False, preferred_sources=preferred_sources)
 
-        asyncio.create_task(run_sync_with_sources())
+            asyncio.create_task(run_sync_with_sources())
 
         # 配置调度：优先使用 CRON，其次使用 HH:MM
         if settings.SYNC_STOCK_BASICS_ENABLED:
@@ -471,62 +465,7 @@ async def lifespan(app: FastAPI):
         else:
             logger.info(f"🔍 AKShare状态检查已配置: {settings.AKSHARE_STATUS_CHECK_CRON}")
 
-        # BaoStock统一数据同步任务配置
-        logger.info("🔄 配置BaoStock统一数据同步任务...")
-
-        # 基础信息同步任务
-        scheduler.add_job(
-            run_baostock_basic_info_sync,
-            CronTrigger.from_crontab(settings.BAOSTOCK_BASIC_INFO_SYNC_CRON, timezone=settings.TIMEZONE),
-            id="baostock_basic_info_sync",
-            name="股票基础信息同步（BaoStock）"
-        )
-        if not (settings.BAOSTOCK_UNIFIED_ENABLED and settings.BAOSTOCK_BASIC_INFO_SYNC_ENABLED):
-            scheduler.pause_job("baostock_basic_info_sync")
-            logger.info(f"⏸️ BaoStock基础信息同步已添加但暂停: {settings.BAOSTOCK_BASIC_INFO_SYNC_CRON}")
-        else:
-            logger.info(f"📋 BaoStock基础信息同步已配置: {settings.BAOSTOCK_BASIC_INFO_SYNC_CRON}")
-
-        # 日K线同步任务（注意：BaoStock不支持实时行情）
-        scheduler.add_job(
-            run_baostock_daily_quotes_sync,
-            CronTrigger.from_crontab(settings.BAOSTOCK_DAILY_QUOTES_SYNC_CRON, timezone=settings.TIMEZONE),
-            id="baostock_daily_quotes_sync",
-            name="日K线数据同步（BaoStock）"
-        )
-        if not (settings.BAOSTOCK_UNIFIED_ENABLED and settings.BAOSTOCK_DAILY_QUOTES_SYNC_ENABLED):
-            scheduler.pause_job("baostock_daily_quotes_sync")
-            logger.info(f"⏸️ BaoStock日K线同步已添加但暂停: {settings.BAOSTOCK_DAILY_QUOTES_SYNC_CRON}")
-        else:
-            logger.info(f"📈 BaoStock日K线同步已配置: {settings.BAOSTOCK_DAILY_QUOTES_SYNC_CRON} (注意：BaoStock不支持实时行情)")
-
-        # 历史数据同步任务
-        scheduler.add_job(
-            run_baostock_historical_sync,
-            CronTrigger.from_crontab(settings.BAOSTOCK_HISTORICAL_SYNC_CRON, timezone=settings.TIMEZONE),
-            id="baostock_historical_sync",
-            name="历史数据同步（BaoStock）"
-        )
-        if not (settings.BAOSTOCK_UNIFIED_ENABLED and settings.BAOSTOCK_HISTORICAL_SYNC_ENABLED):
-            scheduler.pause_job("baostock_historical_sync")
-            logger.info(f"⏸️ BaoStock历史数据同步已添加但暂停: {settings.BAOSTOCK_HISTORICAL_SYNC_CRON}")
-        else:
-            logger.info(f"📊 BaoStock历史数据同步已配置: {settings.BAOSTOCK_HISTORICAL_SYNC_CRON}")
-
-        # 状态检查任务
-        scheduler.add_job(
-            run_baostock_status_check,
-            CronTrigger.from_crontab(settings.BAOSTOCK_STATUS_CHECK_CRON, timezone=settings.TIMEZONE),
-            id="baostock_status_check",
-            name="数据源状态检查（BaoStock）"
-        )
-        if not (settings.BAOSTOCK_UNIFIED_ENABLED and settings.BAOSTOCK_STATUS_CHECK_ENABLED):
-            scheduler.pause_job("baostock_status_check")
-            logger.info(f"⏸️ BaoStock状态检查已添加但暂停: {settings.BAOSTOCK_STATUS_CHECK_CRON}")
-        else:
-            logger.info(f"🔍 BaoStock状态检查已配置: {settings.BAOSTOCK_STATUS_CHECK_CRON}")
-
-        # 新闻数据同步任务配置（使用AKShare同步所有股票新闻）
+        # 新闻数据同步任务配置
         logger.info("🔄 配置新闻数据同步任务...")
 
         from app.worker.akshare_sync_service import get_akshare_sync_service
@@ -551,11 +490,6 @@ async def lifespan(app: FastAPI):
                 )
             except Exception as e:
                 logger.error(f"❌ 新闻同步失败: {e}", exc_info=True)
-
-        # ==================== 港股/美股数据配置 ====================
-        # 港股和美股采用按需获取+缓存模式，不再配置定时同步任务
-        logger.info("🇭🇰 港股数据采用按需获取+缓存模式")
-        logger.info("🇺🇸 美股数据采用按需获取+缓存模式")
 
         scheduler.add_job(
             run_news_sync,
@@ -700,18 +634,12 @@ async def test_log():
 # 注册路由
 app.include_router(health.router, prefix="/api", tags=["health"])
 app.include_router(auth.router, prefix="/api/auth", tags=["authentication"])
-app.include_router(analysis.router, prefix="/api/analysis", tags=["analysis"])
-app.include_router(reports.router, tags=["reports"])
-app.include_router(screening.router, prefix="/api/screening", tags=["screening"])
 app.include_router(pattern_screening.router, prefix="/api", tags=["pattern_screening"])
 app.include_router(strategies.router, prefix="/api", tags=["strategies"])
 app.include_router(queue.router, prefix="/api/queue", tags=["queue"])
-app.include_router(favorites.router, prefix="/api", tags=["favorites"])
 app.include_router(stocks_router.router, prefix="/api", tags=["stocks"])
-app.include_router(multi_market_stocks_router.router, prefix="/api", tags=["multi-market"])
 app.include_router(stock_data_router.router, tags=["stock-data"])
 app.include_router(stock_sync_router.router, tags=["stock-sync"])
-app.include_router(tags.router, prefix="/api", tags=["tags"])
 app.include_router(config.router, prefix="/api", tags=["config"])
 app.include_router(model_capabilities.router, tags=["model-capabilities"])
 app.include_router(usage_statistics.router, tags=["usage-statistics"])
@@ -719,15 +647,10 @@ app.include_router(database.router, prefix="/api/system", tags=["database"])
 app.include_router(cache.router, tags=["cache"])
 app.include_router(operation_logs.router, prefix="/api/system", tags=["operation_logs"])
 app.include_router(logs.router, prefix="/api/system", tags=["logs"])
-# 新增：系统配置只读摘要
+
+# 系统配置
 from app.routers import system_config as system_config_router
 app.include_router(system_config_router.router, prefix="/api/system", tags=["system"])
-
-# 通知模块（REST + SSE）
-app.include_router(notifications_router.router, prefix="/api", tags=["notifications"])
-
-# 🔥 WebSocket 通知模块（替代 SSE + Redis PubSub）
-app.include_router(websocket_notifications_router.router, prefix="/api", tags=["websocket"])
 
 # 定时任务管理
 app.include_router(scheduler_router.router, tags=["scheduler"])
@@ -735,16 +658,12 @@ app.include_router(scheduler_router.router, tags=["scheduler"])
 app.include_router(sse.router, prefix="/api/stream", tags=["streaming"])
 app.include_router(sync_router.router)
 app.include_router(multi_source_sync.router)
-app.include_router(paper_router.router, prefix="/api", tags=["paper"])
 app.include_router(tushare_init.router, prefix="/api", tags=["tushare-init"])
 app.include_router(akshare_init.router, prefix="/api", tags=["akshare-init"])
-app.include_router(baostock_init.router, prefix="/api", tags=["baostock-init"])
 app.include_router(historical_data.router, tags=["historical-data"])
 app.include_router(multi_period_sync.router, tags=["multi-period-sync"])
 app.include_router(financial_data.router, tags=["financial-data"])
 app.include_router(news_data.router, tags=["news-data"])
-app.include_router(social_media.router, tags=["social-media"])
-app.include_router(internal_messages.router, tags=["internal-messages"])
 
 
 @app.get("/")

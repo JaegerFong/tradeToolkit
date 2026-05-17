@@ -189,12 +189,31 @@ class StrategyTaskService:
         if not strategy or not run_doc:
             return
         run = StrategyRun.model_validate(run_doc)
+        if run.status != StrategyRunStatus.QUEUED:
+            return
         stats = StrategyRunStats()
         try:
             await self._update_run(run_id, strategy_id, user_id, {"status": StrategyRunStatus.RUNNING.value, "started_at": now_tz()})
             await self._emit_event(run_id, strategy_id, "load_universe", "加载股票池", "正在读取本地A股基础信息", 5)
             symbols = await self._load_universe(strategy.parse_result.config)
             await db[self.RESULTS].delete_many({"strategy_id": strategy_id, "run_id": run_id})
+            if not symbols:
+                message = "本地 stock_basic_info 为空，无法执行策略筛选。请先同步股票基础信息和日线数据。"
+                await self._emit_event(run_id, strategy_id, "data_incomplete", "数据不完整", message, 100, {"collection": "stock_basic_info"})
+                await self._update_run(
+                    run_id,
+                    strategy_id,
+                    user_id,
+                    {
+                        "status": StrategyRunStatus.DATA_INCOMPLETE.value,
+                        "completed_at": now_tz(),
+                        "progress": {"percent": 100, "step": "data_incomplete", "message": message},
+                        "stats": stats.model_dump(),
+                        "summary": message,
+                        "error": message,
+                    },
+                )
+                return
             await self._emit_event(run_id, strategy_id, "scan", "执行规则", f"开始扫描{len(symbols)}只股票", 10)
 
             results: List[StrategyRunResult] = []
@@ -239,7 +258,19 @@ class StrategyTaskService:
             )
         except Exception as e:
             logger.error("[strategy] run failed: %s", e, exc_info=True)
-            await self._update_run(run_id, strategy_id, user_id, {"status": StrategyRunStatus.FAILED.value, "completed_at": now_tz(), "error": str(e)})
+            message = f"{type(e).__name__}: {e}"
+            await self._emit_event(run_id, strategy_id, "error", "任务失败", message, 100)
+            await self._update_run(
+                run_id,
+                strategy_id,
+                user_id,
+                {
+                    "status": StrategyRunStatus.FAILED.value,
+                    "completed_at": now_tz(),
+                    "progress": {"percent": 100, "step": "error", "message": message},
+                    "error": message,
+                },
+            )
 
     async def create_backtest(self, strategy_id: str, user_id: str, req: StrategyBacktestCreateRequest) -> Optional[StrategyBacktestResponse]:
         await self.ensure_indexes()

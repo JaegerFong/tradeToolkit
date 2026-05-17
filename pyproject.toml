@@ -38,24 +38,10 @@ dependencies = [
 
     # 数据源和金融数据
     "akshare>=1.17.86",
-    "baostock>=0.8.8",
-    "eodhd>=1.0.32",
-    "finnhub-python>=2.4.23",
     "tushare>=1.4.21",
-    "yfinance>=0.2.63",
     "stockstats>=0.6.5",
 
     # AI和LLM
-    "chainlit>=2.5.5",
-    "chromadb>=1.0.12",
-    "dashscope>=1.20.0",
-    "langchain-anthropic>=0.3.15",
-    "langchain-core>=0.3.0",
-    "langchain-experimental>=0.3.4",
-    "langchain-google-genai>=2.1.12",  # 修复 client_options 未定义错误
-    "langchain-openai>=0.3.23",
-    "langgraph>=0.4.8",
-    "openai>=1.0.0,<2.0.0",
 
     # 数据处理和分析
     "pandas>=2.3.0",
@@ -63,9 +49,7 @@ dependencies = [
 
     # 网络爬虫和解析
     "curl-cffi>=0.6.0",  # 模拟真实浏览器TLS指纹，绕过反爬虫检测
-    "feedparser>=6.0.11",
     "parsel>=1.10.0",
-    "praw>=7.8.1",
     "requests>=2.32.4",
 
     # 文档和格式化

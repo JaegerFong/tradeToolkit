@@ -391,13 +391,15 @@ class AKShareInitService:
         
         logger.info(f"  数据完整性验证:")
         logger.info(f"    股票基础信息: {basic_count}条")
-        logger.info(f"    扩展字段覆盖: {extended_count}条 ({extended_count/basic_count*100:.1f}%)")
         logger.info(f"    行情数据: {quotes_count}条")
-        
+
         if basic_count == 0:
-            raise Exception("数据初始化失败：无基础数据")
-        
-        if extended_count / basic_count < 0.9:  # 90%以上应该有扩展字段
+            raise Exception("数据初始化失败：stock_basic_info 为空，请检查 AKShare 股票列表/基础信息同步是否成功")
+
+        coverage = extended_count / basic_count
+        logger.info(f"    扩展字段覆盖: {extended_count}条 ({coverage*100:.1f}%)")
+
+        if coverage < 0.9:  # 90%以上应该有扩展字段
             logger.warning("⚠️ 扩展字段覆盖率较低，可能存在数据质量问题")
         
         self.stats.completed_steps += 1

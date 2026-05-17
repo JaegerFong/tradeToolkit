@@ -1,6 +1,4 @@
 from __future__ import annotations
-
-import asyncio
 from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
@@ -70,10 +68,7 @@ async def create_strategy_run(
     if not run:
         raise HTTPException(status_code=404, detail="Strategy not found")
 
-    def _run_wrapper():
-        asyncio.create_task(svc.run_task_background(strategy_id, run.run_id, user["id"]))
-
-    background_tasks.add_task(_run_wrapper)
+    background_tasks.add_task(svc.run_task_background, strategy_id, run.run_id, user["id"])
     return run
 
 
@@ -130,10 +125,7 @@ async def create_strategy_backtest(
     if not bt:
         raise HTTPException(status_code=404, detail="Strategy not found")
 
-    def _run_wrapper():
-        asyncio.create_task(svc.run_backtest_background(strategy_id, bt.backtest_id, user["id"]))
-
-    background_tasks.add_task(_run_wrapper)
+    background_tasks.add_task(svc.run_backtest_background, strategy_id, bt.backtest_id, user["id"])
     return bt
 
 

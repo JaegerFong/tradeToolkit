@@ -73,6 +73,103 @@ export interface SyncRecommendations {
   warnings: string[]
 }
 
+export interface AkshareDatabaseStatus {
+  basic_info: {
+    total_count: number
+    extended_count: number
+    coverage_rate: number
+    latest_update?: string
+  }
+  market_quotes: {
+    total_count: number
+    latest_update?: string
+  }
+  historical_daily: {
+    total_count: number
+    symbol_count: number
+    earliest_trade_date?: string
+    latest_trade_date?: string
+    latest_update?: string
+  }
+  historical_by_period: Array<{
+    period?: string
+    total_count: number
+    symbol_count: number
+    earliest_trade_date?: string
+    latest_trade_date?: string
+  }>
+  data_quality: string
+  check_time: string
+}
+
+export interface AkshareInitializationStatus {
+  is_running: boolean
+  current_task?: string
+  start_time?: string
+  progress?: {
+    current_step?: string
+    completed_steps?: number
+    total_steps?: number
+  }
+  result?: any
+  duration: number
+}
+
+export interface StockSyncCoveragePeriod {
+  count: number
+  earliest_trade_date?: string
+  latest_trade_date?: string
+  latest_update?: string
+  sources: string[]
+}
+
+export interface StockSyncCoverageItem {
+  code: string
+  name?: string
+  industry?: string
+  market?: string
+  basic: {
+    exists: boolean
+    source?: string
+    latest_update?: string
+  }
+  historical: Record<string, StockSyncCoveragePeriod>
+  financial: {
+    count: number
+    latest_report_period?: string
+    latest_update?: string
+    sources: string[]
+  }
+  quotes: {
+    exists: boolean
+    trade_date?: string
+    latest_update?: string
+    source?: string
+  }
+}
+
+export interface StockSyncCoverageSummary {
+  basic_stock_count: number
+  historical_by_period: Array<{
+    period?: string
+    symbol_count: number
+    record_count: number
+    earliest_trade_date?: string
+    latest_trade_date?: string
+  }>
+  financial_stock_count: number
+  quote_stock_count: number
+}
+
+export interface StockSyncCoverageResponse {
+  items: StockSyncCoverageItem[]
+  total: number
+  page: number
+  page_size: number
+  has_more: boolean
+  summary: StockSyncCoverageSummary
+}
+
 /**
  * 获取数据源状态
  */
@@ -140,6 +237,32 @@ export const getSyncRecommendations = (): Promise<ApiResponse<SyncRecommendation
 }
 
 /**
+ * 获取 AKShare / 策略数据状态，包含日线条数与日期范围
+ */
+export const getAkshareDatabaseStatus = (): Promise<ApiResponse<AkshareDatabaseStatus>> => {
+  return ApiClient.get('/api/akshare-init/status')
+}
+
+/**
+ * 获取 AKShare 初始化/策略数据同步任务状态
+ */
+export const getAkshareInitializationStatus = (): Promise<ApiResponse<AkshareInitializationStatus>> => {
+  return ApiClient.get('/api/akshare-init/initialization-status')
+}
+
+/**
+ * 按指定周期同步策略工具所需数据：基础信息 + 日线
+ */
+export const startStrategyDataSync = (params: {
+  historical_days: number
+  force?: boolean
+}): Promise<ApiResponse<any>> => {
+  return ApiClient.post('/api/akshare-init/start-strategy-sync', params, {
+    timeout: 60000
+  })
+}
+
+/**
  * 获取同步历史记录
  */
 export const getSyncHistory = (params?: {
@@ -165,6 +288,25 @@ export const getSyncHistory = (params?: {
   }
 
   const url = `/api/sync/multi-source/history${queryParams.toString() ? '?' + queryParams.toString() : ''}`
+  return ApiClient.get(url)
+}
+
+/**
+ * 获取股票同步覆盖明细
+ */
+export const getStockSyncCoverage = (params?: {
+  page?: number
+  page_size?: number
+  keyword?: string
+  source?: string
+}): Promise<ApiResponse<StockSyncCoverageResponse>> => {
+  const queryParams = new URLSearchParams()
+  if (params?.page) queryParams.append('page', params.page.toString())
+  if (params?.page_size) queryParams.append('page_size', params.page_size.toString())
+  if (params?.keyword) queryParams.append('keyword', params.keyword)
+  if (params?.source) queryParams.append('source', params.source)
+
+  const url = `/api/sync/multi-source/stock-coverage${queryParams.toString() ? '?' + queryParams.toString() : ''}`
   return ApiClient.get(url)
 }
 

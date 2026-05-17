@@ -217,7 +217,7 @@ const statusTagType = computed(() => {
     case 'running':
       return 'warning'
     default:
-      return 'default'
+      return 'info'
   }
 })
 
@@ -442,4 +442,3 @@ onUnmounted(() => {
   }
 }
 </style>
-

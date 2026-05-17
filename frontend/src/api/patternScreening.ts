@@ -1,4 +1,13 @@
 import { ApiClient } from './request'
+import type { ApiResponse } from './request'
+
+const unwrap = async <T>(promise: Promise<ApiResponse<T> | T>): Promise<T> => {
+  const response = await promise
+  if (response && typeof response === 'object' && 'success' in response && 'data' in response) {
+    return (response as ApiResponse<T>).data
+  }
+  return response as T
+}
 
 export type PatternType = 'laoyatou' | 'n_shape'
 
@@ -104,14 +113,13 @@ export interface PatternResultDetail {
 
 export const patternScreeningApi = {
   createTask: (payload: PatternScreeningCreateReq) =>
-    ApiClient.post<PatternScreeningCreateResp>('/api/pattern-screening/tasks', payload, { timeout: 120000 }),
-  getTask: (taskId: string) => ApiClient.get<PatternTaskResp>(`/api/pattern-screening/tasks/${taskId}`),
-  cancelTask: (taskId: string) => ApiClient.post<{ success: boolean }>(`/api/pattern-screening/tasks/${taskId}/cancel`, {}),
+    unwrap(ApiClient.post<PatternScreeningCreateResp>('/api/pattern-screening/tasks', payload, { timeout: 120000 })),
+  getTask: (taskId: string) => unwrap(ApiClient.get<PatternTaskResp>(`/api/pattern-screening/tasks/${taskId}`)),
+  cancelTask: (taskId: string) => unwrap(ApiClient.post<{ success: boolean }>(`/api/pattern-screening/tasks/${taskId}/cancel`, {})),
   listEvents: (taskId: string, limit = 200) =>
-    ApiClient.get<PatternEvent[]>(`/api/pattern-screening/tasks/${taskId}/events?limit=${limit}`),
+    unwrap(ApiClient.get<PatternEvent[]>(`/api/pattern-screening/tasks/${taskId}/events?limit=${limit}`)),
   listResults: (taskId: string, limit = 50, offset = 0) =>
-    ApiClient.get<PatternResultListResp>(`/api/pattern-screening/tasks/${taskId}/results?limit=${limit}&offset=${offset}`),
+    unwrap(ApiClient.get<PatternResultListResp>(`/api/pattern-screening/tasks/${taskId}/results?limit=${limit}&offset=${offset}`)),
   getResultDetail: (taskId: string, code: string) =>
-    ApiClient.get<PatternResultDetail>(`/api/pattern-screening/tasks/${taskId}/results/${encodeURIComponent(code)}`)
+    unwrap(ApiClient.get<PatternResultDetail>(`/api/pattern-screening/tasks/${taskId}/results/${encodeURIComponent(code)}`))
 }
-

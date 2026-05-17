@@ -108,7 +108,16 @@ import { patternScreeningApi, type PatternScreeningCreateReq } from '@/api/patte
 const router = useRouter()
 const submitting = ref(false)
 
-const form = reactive<PatternScreeningCreateReq>({
+type PatternScreeningForm = {
+  pattern_types: PatternScreeningCreateReq['pattern_types']
+  market: 'CN'
+  universe: NonNullable<PatternScreeningCreateReq['universe']>
+  window: NonNullable<PatternScreeningCreateReq['window']>
+  rules: NonNullable<PatternScreeningCreateReq['rules']>
+  llm: NonNullable<PatternScreeningCreateReq['llm']>
+}
+
+const form = reactive<PatternScreeningForm>({
   pattern_types: ['laoyatou'],
   market: 'CN',
   universe: { board: ['MAIN', 'STAR', 'CHINEXT'], min_market_cap: 0, industries: [] },
@@ -123,7 +132,7 @@ const form = reactive<PatternScreeningCreateReq>({
 })
 
 async function submitTask() {
-  if (!form.pattern_types?.length) {
+  if (!form.pattern_types.length) {
     ElMessage.warning('请选择至少一种形态')
     return
   }
@@ -173,4 +182,3 @@ async function submitTask() {
   }
 }
 </style>
-

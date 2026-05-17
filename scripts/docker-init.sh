@@ -132,11 +132,6 @@ if [ $attempt -eq $max_attempts ]; then
     exit 1
 fi
 
-# 初始化数据库
-echo ""
-echo "初始化数据库..."
-docker-compose exec -T mongodb mongo tradingagents /docker-entrypoint-initdb.d/mongo-init.js
-
 # 启动应用服务
 echo ""
 echo "启动应用服务..."

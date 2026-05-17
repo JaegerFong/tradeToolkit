@@ -596,7 +596,7 @@ class DataSourceManager:
             from .providers.china.baostock import get_baostock_provider
             return get_baostock_provider()
         except ImportError as e:
-            logger.error(f"❌ BaoStock适配器导入失败: {e}")
+            logger.debug(f"BaoStock适配器不可用: {e}")
             return None
 
     # TDX 适配器已移除

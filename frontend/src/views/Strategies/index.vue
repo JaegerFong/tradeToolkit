@@ -56,6 +56,12 @@
             <el-tab-pane label="运行结果" name="run">
               <div v-if="currentRun" class="run-summary">
                 <el-progress :percentage="currentRun.progress?.percent || 0" />
+                <el-alert
+                  v-if="currentRun.error"
+                  type="error"
+                  :closable="false"
+                  :title="currentRun.error"
+                />
                 <p>{{ currentRun.summary || currentRun.progress?.message }}</p>
                 <el-input v-if="currentRun.daily_review" v-model="currentRun.daily_review" type="textarea" :rows="4" readonly />
                 <el-input v-if="currentRun.next_day_plan" v-model="currentRun.next_day_plan" type="textarea" :rows="4" readonly />
@@ -198,6 +204,9 @@ const pollRun = async () => {
       const resp = await strategiesApi.listResults(sid, rid)
       results.value = resp.items
       await loadPool()
+      if (currentRun.value.status === 'failed' || currentRun.value.status === 'data_incomplete') {
+        ElMessage.error(currentRun.value.error || currentRun.value.progress?.message || '策略任务执行失败')
+      }
     }
   }, 2500)
 }

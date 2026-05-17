@@ -37,6 +37,12 @@ class InitializationRequest(BaseModel):
     skip_if_exists: bool = Field(default=True, description="如果数据存在是否跳过")
 
 
+class StrategyDataSyncRequest(BaseModel):
+    """策略数据同步请求模型"""
+    historical_days: int = Field(default=365, ge=1, le=3650, description="历史数据天数")
+    force: bool = Field(default=True, description="是否强制同步，已有数据时也继续执行")
+
+
 class SyncRequest(BaseModel):
     """同步请求模型"""
     force_update: bool = Field(default=False, description="是否强制更新")
@@ -71,6 +77,63 @@ async def get_database_status():
         latest_quotes = await db.market_quotes.find_one(
             {}, sort=[("updated_at", -1)]
         )
+
+        # 检查日线历史数据（策略工具主要依赖）
+        daily_match = {"period": "daily"}
+        daily_count = await db.stock_daily_quotes.count_documents(daily_match)
+        daily_summary = await db.stock_daily_quotes.aggregate([
+            {"$match": daily_match},
+            {
+                "$group": {
+                    "_id": None,
+                    "total_count": {"$sum": 1},
+                    "symbol_count": {"$addToSet": "$symbol"},
+                    "earliest_trade_date": {"$min": "$trade_date"},
+                    "latest_trade_date": {"$max": "$trade_date"},
+                    "latest_update": {"$max": "$updated_at"},
+                }
+            },
+            {
+                "$project": {
+                    "_id": 0,
+                    "total_count": 1,
+                    "symbol_count": {"$size": "$symbol_count"},
+                    "earliest_trade_date": 1,
+                    "latest_trade_date": 1,
+                    "latest_update": 1,
+                }
+            }
+        ]).to_list(length=1)
+        daily_data = daily_summary[0] if daily_summary else {
+            "total_count": daily_count,
+            "symbol_count": 0,
+            "earliest_trade_date": None,
+            "latest_trade_date": None,
+            "latest_update": None,
+        }
+
+        period_rows = await db.stock_daily_quotes.aggregate([
+            {
+                "$group": {
+                    "_id": "$period",
+                    "total_count": {"$sum": 1},
+                    "symbol_count": {"$addToSet": "$symbol"},
+                    "earliest_trade_date": {"$min": "$trade_date"},
+                    "latest_trade_date": {"$max": "$trade_date"},
+                }
+            },
+            {
+                "$project": {
+                    "_id": 0,
+                    "period": "$_id",
+                    "total_count": 1,
+                    "symbol_count": {"$size": "$symbol_count"},
+                    "earliest_trade_date": 1,
+                    "latest_trade_date": 1,
+                }
+            },
+            {"$sort": {"period": 1}}
+        ]).to_list(length=None)
         
         # 数据质量评估
         data_quality = "excellent"
@@ -94,6 +157,8 @@ async def get_database_status():
                     "total_count": quotes_count,
                     "latest_update": latest_quotes.get("updated_at") if latest_quotes else None
                 },
+                "historical_daily": daily_data,
+                "historical_by_period": period_rows,
                 "data_quality": data_quality,
                 "check_time": now_tz()
             },
@@ -198,6 +263,61 @@ async def start_full_initialization(
         _initialization_status["is_running"] = False
         logger.error(f"启动完整初始化失败: {e}")
         raise HTTPException(status_code=500, detail=f"启动初始化失败: {str(e)}")
+
+
+@router.post("/start-strategy-sync")
+async def start_strategy_data_sync(
+    request: StrategyDataSyncRequest,
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    启动策略工具所需数据同步：A 股基础信息 + 指定周期日线。
+
+    该接口用于页面手动触发近 1 年、近 2 年、近 3 年等周期同步。
+    """
+    global _initialization_status
+
+    if _initialization_status["is_running"]:
+        raise HTTPException(status_code=400, detail="同步任务正在运行中")
+
+    try:
+        _initialization_status.update({
+            "is_running": True,
+            "current_task": "strategy_data_sync",
+            "start_time": now_tz(),
+            "progress": {
+                "current_step": f"准备同步策略数据({request.historical_days}天)",
+                "completed_steps": 0,
+                "total_steps": 4
+            },
+            "result": None
+        })
+
+        background_tasks.add_task(
+            _run_strategy_data_sync_background,
+            request.historical_days,
+            request.force
+        )
+
+        return {
+            "success": True,
+            "data": {
+                "task_id": "strategy_data_sync",
+                "start_time": _initialization_status["start_time"],
+                "parameters": {
+                    "historical_days": request.historical_days,
+                    "force": request.force,
+                    "sync_items": ["basic_info", "historical"]
+                }
+            },
+            "message": "策略数据同步任务已启动"
+        }
+
+    except Exception as e:
+        _initialization_status["is_running"] = False
+        logger.error(f"启动策略数据同步失败: {e}")
+        raise HTTPException(status_code=500, detail=f"启动同步失败: {str(e)}")
 
 
 @router.post("/start-basic-sync")
@@ -347,6 +467,33 @@ async def _run_full_initialization_background(historical_days: int, force: bool)
             "result": {"success": False, "error": str(e)}
         })
         logger.error(f"完整初始化后台任务失败: {e}")
+
+
+async def _run_strategy_data_sync_background(historical_days: int, force: bool):
+    """后台运行策略数据同步"""
+    global _initialization_status
+
+    try:
+        service = await get_akshare_init_service()
+        result = await service.run_full_initialization(
+            historical_days=historical_days,
+            skip_if_exists=not force,
+            sync_items=["basic_info", "historical"]
+        )
+
+        _initialization_status.update({
+            "is_running": False,
+            "result": result
+        })
+
+        logger.info(f"策略数据同步后台任务完成: {result}")
+
+    except Exception as e:
+        _initialization_status.update({
+            "is_running": False,
+            "result": {"success": False, "error": str(e)}
+        })
+        logger.error(f"策略数据同步后台任务失败: {e}")
 
 
 async def _run_basic_sync_background(force_update: bool):

@@ -12,7 +12,10 @@ from dataclasses import dataclass
 from app.services.historical_data_service import get_historical_data_service
 from app.worker.tushare_sync_service import TushareSyncService
 from app.worker.akshare_sync_service import AKShareSyncService
-from app.worker.baostock_sync_service import BaoStockSyncService
+try:
+    from app.worker.baostock_sync_service import BaoStockSyncService
+except ImportError:
+    BaoStockSyncService = None
 
 logger = logging.getLogger(__name__)
 
@@ -54,8 +57,11 @@ class MultiPeriodSyncService:
             self.akshare_service = AKShareSyncService()
             await self.akshare_service.initialize()
             
-            self.baostock_service = BaoStockSyncService()
-            await self.baostock_service.initialize()
+            if BaoStockSyncService is not None:
+                self.baostock_service = BaoStockSyncService()
+                await self.baostock_service.initialize()
+            else:
+                self.baostock_service = None
             
             logger.info("✅ 多周期同步服务初始化完成")
             
@@ -160,6 +166,9 @@ class MultiPeriodSyncService:
             elif data_source == "akshare":
                 service = self.akshare_service
             elif data_source == "baostock":
+                if self.baostock_service is None:
+                    logger.warning("⚠️ BaoStock 服务不可用，跳过")
+                    return stats
                 service = self.baostock_service
             else:
                 logger.error(f"❌ 不支持的数据源: {data_source}")

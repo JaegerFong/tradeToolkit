@@ -8,6 +8,14 @@ import pandas as pd
 
 from .base import DataSourceAdapter
 
+# 在导入 akshare 前初始化网络层 (代理轮转/限速/浏览器指纹)
+# 该调用是幂等的, 多次调用安全
+try:
+    from tradingagents.dataflows.providers.china.akshare_network import init_akshare_network
+    init_akshare_network()
+except Exception:
+    pass
+
 logger = logging.getLogger(__name__)
 
 

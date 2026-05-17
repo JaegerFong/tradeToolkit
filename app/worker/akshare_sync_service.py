@@ -4,6 +4,8 @@ AKShare数据同步服务
 """
 import asyncio
 import logging
+import os
+import random
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 
@@ -32,7 +34,10 @@ class AKShareSyncService:
         self.news_service = None  # 延迟初始化
         self.db = None
         self.batch_size = 100
-        self.rate_limit_delay = 0.2  # AKShare建议的延迟
+        self.rate_limit_delay = float(os.getenv("AKSHARE_RATE_LIMIT_DELAY", os.getenv("AKSHARE_RATE_LIMIT", "0.2")))
+        self.historical_retries = max(1, int(os.getenv("AKSHARE_HISTORICAL_RETRIES", "3")))
+        self.historical_retry_delay = float(os.getenv("AKSHARE_HISTORICAL_RETRY_DELAY", "2.0"))
+        self.single_symbol_timeout = float(os.getenv("AKSHARE_SINGLE_SYMBOL_TIMEOUT", "90"))
     
     async def initialize(self):
         """初始化同步服务"""
@@ -658,8 +663,28 @@ class AKShareSyncService:
                         # 全量同步：最近1年
                         symbol_start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
 
-                # 获取历史数据
-                hist_data = await self.provider.get_historical_data(symbol, symbol_start_date, end_date, period)
+                # 获取历史数据：全市场同步很容易遇到上游临时断连，单股失败时重试后再跳过
+                hist_data = None
+                last_error = None
+                for attempt in range(1, self.historical_retries + 1):
+                    try:
+                        hist_data = await asyncio.wait_for(
+                            self.provider.get_historical_data(symbol, symbol_start_date, end_date, period),
+                            timeout=self.single_symbol_timeout
+                        )
+                        if hist_data is not None and not hist_data.empty:
+                            break
+                        last_error = RuntimeError("历史数据为空")
+                    except Exception as e:
+                        last_error = e
+
+                    if attempt < self.historical_retries:
+                        sleep_seconds = self.historical_retry_delay * attempt + random.uniform(0, self.rate_limit_delay)
+                        logger.debug(
+                            f"⚠️ {symbol}{period}历史数据获取失败/为空，"
+                            f"{sleep_seconds:.1f}秒后重试 {attempt}/{self.historical_retries}: {last_error}"
+                        )
+                        await asyncio.sleep(sleep_seconds)
 
                 if hist_data is not None and not hist_data.empty:
                     # 保存到统一历史数据集合
@@ -681,7 +706,7 @@ class AKShareSyncService:
                     batch_stats["error_count"] += 1
                     batch_stats["errors"].append({
                         "code": symbol,
-                        "error": "历史数据为空",
+                        "error": str(last_error) if last_error else "历史数据为空",
                         "context": "_process_historical_batch"
                     })
 
@@ -1155,6 +1180,12 @@ async def get_akshare_sync_service() -> AKShareSyncService:
 
 
 # APScheduler兼容的任务函数
+async def _is_trading_day() -> bool:
+    """检查今天是否为 A 股交易日"""
+    from tradingagents.dataflows.providers.china.akshare_network import is_trading_day
+    return is_trading_day()
+
+
 async def run_akshare_basic_info_sync(force_update: bool = False):
     """APScheduler任务：同步股票基础信息"""
     try:
@@ -1172,11 +1203,13 @@ async def run_akshare_quotes_sync(force: bool = False):
     APScheduler任务：同步实时行情
 
     Args:
-        force: 是否强制执行（跳过交易时间检查），默认 False
+        force: 是否强制执行（跳过交易日检查），默认 False
     """
+    if not force and not await _is_trading_day():
+        logger.info("AKShare 行情同步跳过: 非交易日")
+        return {"skipped": True, "reason": "非交易日"}
     try:
         service = await get_akshare_sync_service()
-        # 注意：AKShare 没有交易时间检查逻辑，force 参数仅用于接口一致性
         result = await service.sync_realtime_quotes(force=force)
         logger.info(f"✅ AKShare行情同步完成: {result}")
         return result
@@ -1187,6 +1220,9 @@ async def run_akshare_quotes_sync(force: bool = False):
 
 async def run_akshare_historical_sync(incremental: bool = True):
     """APScheduler任务：同步历史数据"""
+    if not await _is_trading_day():
+        logger.info("AKShare 历史数据同步跳过: 非交易日")
+        return {"skipped": True, "reason": "非交易日"}
     try:
         service = await get_akshare_sync_service()
         result = await service.sync_historical_data(incremental=incremental)

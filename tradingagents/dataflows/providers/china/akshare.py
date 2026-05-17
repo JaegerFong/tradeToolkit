@@ -1,6 +1,8 @@
 """
 AKShare统一数据提供器
 基于AKShare SDK的统一数据同步方案，提供标准化的数据接口
+
+网络层由 akshare_network 模块统一管理 (代理轮转/限速/重试/浏览器指纹).
 """
 import asyncio
 import logging
@@ -9,6 +11,11 @@ from typing import Dict, Any, List, Optional, Union
 import pandas as pd
 
 from ..base_provider import BaseStockDataProvider
+from .akshare_network import (
+    init_akshare_network,
+    is_patch_applied,
+    get_session_manager,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +23,7 @@ logger = logging.getLogger(__name__)
 class AKShareProvider(BaseStockDataProvider):
     """
     AKShare统一数据提供器
-    
+
     提供标准化的股票数据接口，支持：
     - 股票基础信息获取
     - 历史行情数据
@@ -24,151 +31,45 @@ class AKShareProvider(BaseStockDataProvider):
     - 财务数据
     - 港股数据支持
     """
-    
+
     def __init__(self):
         super().__init__("AKShare")
         self.ak = None
         self.connected = False
-        self._stock_list_cache = None  # 缓存股票列表，避免重复获取
-        self._cache_time = None  # 缓存时间
+        self._stock_list_cache = None
+        self._cache_time = None
         self._initialize_akshare()
-    
+
     def _initialize_akshare(self):
-        """初始化AKShare连接"""
+        """初始化AKShare连接
+
+        先初始化网络层 (代理轮转/限速/浏览器指纹),
+        再导入 akshare, 确保所有 akshare 内部请求都经过代理.
+        """
         try:
+            # 1. 初始化网络层 (必须在 import akshare 之前, 因为 akshare 内部会
+            #    在模块级别创建 requests.Session, 需要在创建前打好补丁)
+            init_akshare_network()
+
+            # 2. 导入 akshare
             import akshare as ak
-            import requests
-            import time
-
-            # 尝试导入 curl_cffi，如果可用则使用它来绕过反爬虫
-            try:
-                from curl_cffi import requests as curl_requests
-                use_curl_cffi = True
-                logger.info("🔧 检测到 curl_cffi，将使用它来模拟真实浏览器 TLS 指纹")
-            except ImportError:
-                use_curl_cffi = False
-                logger.warning("⚠️ curl_cffi 未安装，将使用标准 requests（可能被反爬虫拦截）")
-                logger.warning("   建议安装: pip install curl-cffi")
-
-            # 修复AKShare的bug：设置requests的默认headers，并添加请求延迟
-            # AKShare的stock_news_em()函数没有设置必要的headers，导致API返回空响应
-            if not hasattr(requests, '_akshare_headers_patched'):
-                original_get = requests.get
-                last_request_time = {'time': 0}  # 使用字典以便在闭包中修改
-
-                def patched_get(url, **kwargs):
-                    """
-                    包装requests.get方法，自动添加必要的headers和请求延迟
-                    修复AKShare stock_news_em()函数缺少headers的问题
-                    如果可用，使用 curl_cffi 模拟真实浏览器 TLS 指纹
-                    """
-                    # 添加请求延迟，避免被反爬虫封禁
-                    # 只对东方财富网的请求添加延迟
-                    if 'eastmoney.com' in url:
-                        current_time = time.time()
-                        time_since_last_request = current_time - last_request_time['time']
-                        if time_since_last_request < 0.5:  # 至少间隔0.5秒
-                            time.sleep(0.5 - time_since_last_request)
-                        last_request_time['time'] = time.time()
-
-                    # 如果是东方财富网的请求，且 curl_cffi 可用，使用它来绕过反爬虫
-                    if use_curl_cffi and 'eastmoney.com' in url:
-                        try:
-                            # 使用 curl_cffi 模拟 Chrome 120 的 TLS 指纹
-                            # 注意：使用 impersonate 时，不要传递自定义 headers，让 curl_cffi 自动设置
-                            curl_kwargs = {
-                                'timeout': kwargs.get('timeout', 10),
-                                'impersonate': "chrome120"  # 模拟 Chrome 120
-                            }
-
-                            # 只传递非 headers 的参数
-                            if 'params' in kwargs:
-                                curl_kwargs['params'] = kwargs['params']
-                            # 不传递 headers，让 impersonate 自动设置
-                            if 'data' in kwargs:
-                                curl_kwargs['data'] = kwargs['data']
-                            if 'json' in kwargs:
-                                curl_kwargs['json'] = kwargs['json']
-
-                            response = curl_requests.get(url, **curl_kwargs)
-                            # curl_cffi 的响应对象已经兼容 requests.Response
-                            return response
-                        except Exception as e:
-                            # curl_cffi 失败，回退到标准 requests
-                            error_msg = str(e)
-                            # 忽略 TLS 库错误和 400 错误的详细日志（这是 Docker 环境的已知问题）
-                            if 'invalid library' not in error_msg and '400' not in error_msg:
-                                logger.warning(f"⚠️ curl_cffi 请求失败，回退到标准 requests: {e}")
-
-                    # 标准 requests 请求（非东方财富网，或 curl_cffi 不可用/失败）
-                    # 设置浏览器请求头
-                    if 'headers' not in kwargs or kwargs['headers'] is None:
-                        kwargs['headers'] = {
-                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-                            'Accept-Encoding': 'gzip, deflate, br',
-                            'Referer': 'https://www.eastmoney.com/',
-                            'Connection': 'keep-alive',
-                        }
-                    elif isinstance(kwargs['headers'], dict):
-                        # 如果已有headers，确保包含必要的字段
-                        if 'User-Agent' not in kwargs['headers']:
-                            kwargs['headers']['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                        if 'Referer' not in kwargs['headers']:
-                            kwargs['headers']['Referer'] = 'https://www.eastmoney.com/'
-                        if 'Accept' not in kwargs['headers']:
-                            kwargs['headers']['Accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
-                        if 'Accept-Language' not in kwargs['headers']:
-                            kwargs['headers']['Accept-Language'] = 'zh-CN,zh;q=0.9,en;q=0.8'
-
-                    # 添加重试机制（最多3次）
-                    max_retries = 3
-                    for attempt in range(max_retries):
-                        try:
-                            return original_get(url, **kwargs)
-                        except Exception as e:
-                            # 检查是否是SSL错误
-                            error_str = str(e)
-                            is_ssl_error = ('SSL' in error_str or 'ssl' in error_str or
-                                          'UNEXPECTED_EOF_WHILE_READING' in error_str)
-
-                            if is_ssl_error and attempt < max_retries - 1:
-                                # SSL错误，等待后重试
-                                wait_time = 0.5 * (attempt + 1)  # 递增等待时间
-                                time.sleep(wait_time)
-                                continue
-                            else:
-                                # 非SSL错误或已达到最大重试次数，直接抛出
-                                raise
-
-                # 应用patch
-                requests.get = patched_get
-                requests._akshare_headers_patched = True
-
-                if use_curl_cffi:
-                    logger.info("🔧 已修复AKShare的headers问题，使用 curl_cffi 模拟真实浏览器（Chrome 120）")
-                else:
-                    logger.info("🔧 已修复AKShare的headers问题，并添加请求延迟（0.5秒）")
-
             self.ak = ak
             self.connected = True
 
-            # 配置超时和重试
+            # 3. 配置超时
             self._configure_timeout()
 
-            logger.info("✅ AKShare连接成功")
+            logger.info("AKShare 连接成功 (网络层已激活)")
         except ImportError as e:
-            logger.error(f"❌ AKShare未安装: {e}")
+            logger.error(f"AKShare 未安装: {e}")
             self.connected = False
         except Exception as e:
-            logger.error(f"❌ AKShare初始化失败: {e}")
+            logger.error(f"AKShare 初始化失败: {e}")
             self.connected = False
 
     def _get_stock_news_direct(self, symbol: str, limit: int = 10) -> Optional[pd.DataFrame]:
         """
-        直接调用东方财富网新闻 API（绕过 AKShare）
-        使用 curl_cffi 模拟真实浏览器，适用于 Docker 环境
+        直接调用东方财富网新闻 API（使用网络层, 自动享受代理轮转）
 
         Args:
             symbol: 股票代码
@@ -178,15 +79,11 @@ class AKShareProvider(BaseStockDataProvider):
             新闻 DataFrame 或 None
         """
         try:
-            from curl_cffi import requests as curl_requests
             import json
             import time
-            import os
 
-            # 标准化股票代码
             symbol_6 = symbol.zfill(6)
 
-            # 构建请求参数
             url = "https://search-api-web.eastmoney.com/search/jsonp"
             param = {
                 "uid": "",
@@ -213,26 +110,20 @@ class AKShareProvider(BaseStockDataProvider):
                 "_": str(int(time.time() * 1000))
             }
 
-            # 使用 curl_cffi 发送请求
-            response = curl_requests.get(
-                url,
-                params=params,
-                timeout=10,
-                impersonate="chrome120"
-            )
+            # 使用网络层统一请求 (自动代理轮转)
+            mgr = get_session_manager()
+            response = mgr.request(url, "GET", params=params, timeout=10)
 
             if response.status_code != 200:
                 self.logger.error(f"❌ {symbol} 东方财富网 API 返回错误: {response.status_code}")
                 return None
 
-            # 解析 JSONP 响应
             text = response.text
             if text.startswith("jQuery"):
                 text = text[text.find("(")+1:text.rfind(")")]
 
             data = json.loads(text)
 
-            # 检查返回数据
             if "result" not in data or "cmsArticleWebOld" not in data["result"]:
                 self.logger.error(f"❌ {symbol} 东方财富网 API 返回数据结构异常")
                 return None
@@ -243,7 +134,6 @@ class AKShareProvider(BaseStockDataProvider):
                 self.logger.warning(f"⚠️ {symbol} 未获取到新闻")
                 return None
 
-            # 转换为 DataFrame（与 AKShare 格式兼容）
             news_data = []
             for article in articles:
                 news_data.append({
@@ -321,9 +211,21 @@ class AKShareProvider(BaseStockDataProvider):
         try:
             logger.info("📋 获取AKShare股票列表...")
 
-            # 使用线程池异步获取股票列表，添加超时保护
             def fetch_stock_list():
-                return self.ak.stock_info_a_code_name()
+                try:
+                    return self.ak.stock_info_a_code_name()
+                except Exception as primary_error:
+                    logger.warning(f"⚠️ AKShare stock_info_a_code_name 失败，尝试东方财富实时列表: {primary_error}")
+                    spot_df = self.ak.stock_zh_a_spot_em()
+                    if spot_df is None or spot_df.empty:
+                        raise primary_error
+
+                    code_col = "代码" if "代码" in spot_df.columns else "code"
+                    name_col = "名称" if "名称" in spot_df.columns else "name"
+                    if code_col not in spot_df.columns or name_col not in spot_df.columns:
+                        raise RuntimeError(f"AKShare备用股票列表缺少代码/名称字段: {list(spot_df.columns)}")
+
+                    return spot_df[[code_col, name_col]].rename(columns={code_col: "code", name_col: "name"})
 
             stock_df = await asyncio.to_thread(fetch_stock_list)
 
@@ -404,7 +306,20 @@ class AKShareProvider(BaseStockDataProvider):
 
         # 否则重新获取
         def fetch_stock_list():
-            return self.ak.stock_info_a_code_name()
+            try:
+                return self.ak.stock_info_a_code_name()
+            except Exception as primary_error:
+                logger.warning(f"⚠️ AKShare stock_info_a_code_name 失败，尝试东方财富实时列表: {primary_error}")
+                spot_df = self.ak.stock_zh_a_spot_em()
+                if spot_df is None or spot_df.empty:
+                    raise primary_error
+
+                code_col = "代码" if "代码" in spot_df.columns else "code"
+                name_col = "名称" if "名称" in spot_df.columns else "name"
+                if code_col not in spot_df.columns or name_col not in spot_df.columns:
+                    raise RuntimeError(f"AKShare备用股票列表缺少代码/名称字段: {list(spot_df.columns)}")
+
+                return spot_df[[code_col, name_col]].rename(columns={code_col: "code", name_col: "name"})
 
         try:
             stock_list = await asyncio.to_thread(fetch_stock_list)
@@ -1308,13 +1223,13 @@ class AKShareProvider(BaseStockDataProvider):
                         if news_df is not None and not news_df.empty:
                             self.logger.info(f"✅ {symbol} Docker 环境直接调用 API 成功")
                         else:
-                            self.logger.warning(f"⚠️ {symbol} Docker 环境直接调用 API 失败，回退到 AKShare")
+                            self.logger.debug(f"⚠️ {symbol} Docker 直接调用 API 失败，回退到 AKShare")
                             news_df = None  # 回退到 AKShare
                     except ImportError:
-                        self.logger.warning(f"⚠️ curl_cffi 未安装，回退到 AKShare")
+                        self.logger.debug(f"⚠️ curl_cffi 未安装，回退到 AKShare")
                         news_df = None
                     except Exception as e:
-                        self.logger.warning(f"⚠️ {symbol} Docker 环境直接调用 API 异常: {e}，回退到 AKShare")
+                        self.logger.debug(f"⚠️ {symbol} Docker 直接调用 API 异常: {e}，回退到 AKShare")
                         news_df = None
 
                 # 如果直接调用失败或不在 Docker 环境，使用 AKShare

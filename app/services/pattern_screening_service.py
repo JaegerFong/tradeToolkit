@@ -180,7 +180,7 @@ class PatternScreeningService:
             await self._emit_event(db, task_id, "load_kline", "读取K线", f"开始读取最近 {lookback_days} 日K线并扫描形态", 15)
 
             # 计算起始日期（简化：按自然日回退，最终以 trade_date 过滤）
-            start_date = now_tz().date() - timedelta(days=lookback_days * 2)
+            start_date = (now_tz().date() - timedelta(days=lookback_days * 2)).strftime("%Y-%m-%d")
 
             # 遍历股票：逐股读取最近 N 日 daily K 线（性能后续可优化为批量聚合）
             selected: List[Dict[str, Any]] = []
@@ -207,7 +207,7 @@ class PatternScreeningService:
                         {
                             "symbol": code6,
                             "period": "daily",
-                            "trade_date": {"$gte": datetime.combine(start_date, datetime.min.time())},
+                            "trade_date": {"$gte": start_date},
                         },
                         {"_id": 0, "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1, "trade_date": 1},
                     )
@@ -467,4 +467,3 @@ def get_pattern_screening_service() -> PatternScreeningService:
     if _svc is None:
         _svc = PatternScreeningService()
     return _svc
-

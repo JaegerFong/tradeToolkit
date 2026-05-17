@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -32,14 +31,7 @@ async def create_pattern_screening_task(
     created = await svc.create_task(user["id"], request)
     task_id = created["task_id"]
 
-    async def _run():
-        await svc.run_task_background(task_id, user["id"])
-
-    # FastAPI BackgroundTasks 不支持直接 await async，因此用 asyncio.create_task 包一层
-    def _run_wrapper():
-        asyncio.create_task(_run())
-
-    background_tasks.add_task(_run_wrapper)
+    background_tasks.add_task(svc.run_task_background, task_id, user["id"])
     return PatternScreeningCreateResponse(task_id=task_id, status=created["status"])
 
 
@@ -88,4 +80,3 @@ async def cancel_pattern_screening_task(task_id: str, user: dict = Depends(get_c
     svc = get_pattern_screening_service()
     ok = await svc.cancel_task(task_id, user["id"])
     return {"success": ok}
-

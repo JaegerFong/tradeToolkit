@@ -31,6 +31,11 @@
       <el-row :gutter="24">
         <!-- 左侧列 -->
         <el-col :lg="12" :md="24" :sm="24">
+          <!-- 策略行情数据 -->
+          <div class="content-section">
+            <StrategyDataSync />
+          </div>
+
           <!-- 数据源状态 -->
           <div class="content-section">
             <DataSourceStatus ref="dataSourceStatusRef" />
@@ -47,6 +52,11 @@
           <!-- 同步控制 -->
           <div class="content-section">
             <SyncControl @sync-completed="handleSyncCompleted" />
+          </div>
+
+          <!-- 股票同步覆盖明细 -->
+          <div class="content-section">
+            <StockSyncCoverage />
           </div>
           
           <!-- 同步历史 -->
@@ -132,6 +142,8 @@ import DataSourceStatus from '@/components/Sync/DataSourceStatus.vue'
 import SyncControl from '@/components/Sync/SyncControl.vue'
 import SyncRecommendations from '@/components/Sync/SyncRecommendations.vue'
 import SyncHistory from '@/components/Sync/SyncHistory.vue'
+import StrategyDataSync from '@/components/Sync/StrategyDataSync.vue'
+import StockSyncCoverage from '@/components/Sync/StockSyncCoverage.vue'
 
 // 响应式数据
 const testing = ref(false)
