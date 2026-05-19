@@ -214,7 +214,7 @@ export const runStockBasicsSync = (params?: {
 
   const url = `/api/sync/multi-source/stock_basics/run${queryParams.toString() ? '?' + queryParams.toString() : ''}`
   return ApiClient.post(url, undefined, {
-    timeout: 600000 // 🔥 同步操作需要更长时间，设置为10分钟（BaoStock需要逐个获取估值数据）
+    timeout: 600000 // 同步操作需要更长时间，设置为10分钟
   })
 }
 
@@ -324,4 +324,58 @@ export const runSingleSourceSync = (): Promise<ApiResponse<any>> => {
 
 export const getSingleSourceSyncStatus = (): Promise<ApiResponse<any>> => {
   return ApiClient.get('/api/sync/stock_basics/status')
+}
+
+// ── 统一同步 API ──────────────────────────────────────────
+
+export interface SyncItem {
+  key: string
+  label: string
+}
+
+export interface UnifiedSyncRequest {
+  sync_items: string[]
+  data_sources: string[]
+  mode: string
+  start_date?: string
+  end_date?: string
+  symbol_scope: string
+  symbols?: string[]
+}
+
+export interface UnifiedSyncResult {
+  job_id: string
+  total_steps: number
+  completed_steps: number
+  status: string
+  results: { step: string; success: boolean; error?: string; result?: any }[]
+  current_step?: string
+  started_at?: string
+  finished_at?: string
+}
+
+export const getSyncItems = (): Promise<ApiResponse<{ items: SyncItem[]; sources: { key: string; label: string }[] }>> => {
+  return ApiClient.get('/api/sync/multi-source/unified/sync-items')
+}
+
+export const runUnifiedSync = (params: UnifiedSyncRequest): Promise<ApiResponse<{ job_id: string; config: any }>> => {
+  return ApiClient.post('/api/sync/multi-source/unified/run', params, { timeout: 30000 })
+}
+
+export const getUnifiedSyncStatus = (jobId: string): Promise<ApiResponse<UnifiedSyncResult>> => {
+  return ApiClient.get(`/api/sync/multi-source/unified/status/${jobId}`)
+}
+
+export const cancelUnifiedSync = (jobId: string): Promise<ApiResponse<any>> => {
+  return ApiClient.post(`/api/sync/multi-source/unified/cancel/${jobId}`)
+}
+
+/** 获取当前运行中的同步任务（页面刷新后恢复进度） */
+export const getRunningSyncJobs = (): Promise<ApiResponse<{ running_tasks: any[] }>> => {
+  return ApiClient.get('/api/sync/multi-source/unified/running')
+}
+
+/** 停止 AKShare 初始化/策略同步任务 */
+export const stopAkshareInit = (): Promise<ApiResponse<any>> => {
+  return ApiClient.post('/api/akshare-init/stop')
 }

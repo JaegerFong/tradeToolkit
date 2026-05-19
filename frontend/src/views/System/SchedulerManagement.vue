@@ -62,7 +62,6 @@
             <el-option label="全部数据源" value="" />
             <el-option label="Tushare" value="Tushare" />
             <el-option label="AKShare" value="AKShare" />
-            <el-option label="BaoStock" value="BaoStock" />
             <el-option label="多数据源" value="多数据源" />
             <el-option label="其他" value="其他" />
           </el-select>
@@ -670,11 +669,10 @@ const filteredJobs = computed(() => {
   // 按数据源筛选
   if (filterDataSource.value) {
     if (filterDataSource.value === '其他') {
-      // 其他：不包含 Tushare、AKShare、BaoStock、多数据源
+      // 其他：不包含 Tushare、AKShare、多数据源
       result = result.filter(job =>
         !job.name.includes('Tushare') &&
         !job.name.includes('AKShare') &&
-        !job.name.includes('BaoStock') &&
         !job.name.includes('多数据源')
       )
     } else {

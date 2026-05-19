@@ -53,7 +53,6 @@ async def get_data_sources_status():
             descriptions = {
                 "tushare": "专业金融数据API，提供高质量的A股数据和财务指标",
                 "akshare": "开源金融数据库，提供基础的股票信息",
-                "baostock": "免费开源的证券数据平台，提供历史数据"
             }
 
             status_item = {
@@ -106,7 +105,6 @@ async def get_current_data_source():
         descriptions = {
             "tushare": "专业金融数据API",
             "akshare": "开源金融数据库",
-            "baostock": "免费证券数据平台"
         }
 
         result = {
@@ -666,3 +664,205 @@ async def clear_sync_cache():
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to clear cache: {str(e)}")
+
+
+# ── 统一同步 API ──────────────────────────────────────────
+
+from app.services.unified_sync_service import (
+    UnifiedSyncConfig,
+    get_unified_sync_service,
+    SYNC_ITEMS,
+)
+
+
+class UnifiedSyncRequest(BaseModel):
+    """统一同步请求"""
+    sync_items: List[str] = ["basic_info", "historical"]
+    data_sources: List[str] = ["tushare", "akshare"]
+    mode: str = "incremental"  # incremental / full / date_range
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    symbol_scope: str = "all"  # all / custom / favorites
+    symbols: Optional[List[str]] = None
+
+
+@router.get("/unified/sync-items")
+async def get_sync_items():
+    """获取可用的同步数据类型列表"""
+    return SyncResponse(
+        success=True,
+        message="Available sync items",
+        data={
+            "items": [
+                {"key": k, "label": v}
+                for k, v in SYNC_ITEMS.items()
+            ],
+            "sources": [
+                {"key": "tushare", "label": "Tushare"},
+                {"key": "akshare", "label": "AKShare"},
+            ],
+        },
+    )
+
+
+@router.post("/unified/run")
+async def run_unified_sync(req: UnifiedSyncRequest):
+    """执行统一数据同步"""
+    import uuid
+    from app.services.scheduler_service import get_scheduler_service
+
+    job_id = f"unified_sync_{uuid.uuid4().hex[:12]}"
+
+    config = UnifiedSyncConfig(
+        sync_items=req.sync_items,
+        data_sources=req.data_sources,
+        mode=req.mode,
+        start_date=req.start_date,
+        end_date=req.end_date,
+        symbol_scope=req.symbol_scope,
+        symbols=req.symbols,
+    )
+
+    # 创建执行记录
+    try:
+        svc = get_scheduler_service()
+        if svc and svc.db:
+            await svc.db.scheduler_executions.insert_one({
+                "job_id": job_id,
+                "job_name": "统一数据同步",
+                "status": "running",
+                "scheduled_time": __import__("datetime").datetime.now(),
+                "timestamp": __import__("datetime").datetime.now(),
+                "is_manual": True,
+                "progress": 0,
+                "progress_message": "初始化...",
+            })
+    except Exception:
+        pass
+
+    # 后台异步执行
+    import asyncio as _asyncio
+    unified = get_unified_sync_service()
+
+    async def _run():
+        try:
+            await unified.run_sync(job_id, config)
+        except Exception as e:
+            logger.error(f"统一同步 {job_id} 后台执行失败: {e}")
+
+    _asyncio.create_task(_run())
+
+    return SyncResponse(
+        success=True,
+        message="同步任务已启动",
+        data={
+            "job_id": job_id,
+            "config": {
+                "sync_items": req.sync_items,
+                "data_sources": req.data_sources,
+                "mode": req.mode,
+                "symbol_scope": req.symbol_scope,
+            },
+        },
+    )
+
+
+@router.get("/unified/status/{job_id}")
+async def get_unified_sync_status(job_id: str):
+    """查询统一同步任务状态"""
+    unified = get_unified_sync_service()
+    status = unified.get_job_status(job_id)
+
+    if status is None:
+        # 尝试从 scheduler_executions 查询
+        try:
+            from app.services.scheduler_service import get_scheduler_service
+            svc = get_scheduler_service()
+            if svc and svc.db:
+                doc = await svc.db.scheduler_executions.find_one(
+                    {"job_id": job_id}, sort=[("timestamp", -1)]
+                )
+                if doc:
+                    doc.pop("_id", None)
+                    return SyncResponse(
+                        success=True, message="任务状态", data=doc
+                    )
+        except Exception:
+            pass
+        raise HTTPException(status_code=404, detail=f"任务 {job_id} 未找到")
+
+    return SyncResponse(success=True, message="任务状态", data=status)
+
+
+@router.post("/unified/cancel/{job_id}")
+async def cancel_unified_sync(job_id: str):
+    """取消统一同步任务"""
+    unified = get_unified_sync_service()
+    if unified.cancel_job(job_id):
+        return SyncResponse(success=True, message="任务已取消", data={"job_id": job_id})
+    raise HTTPException(status_code=404, detail=f"任务 {job_id} 未找到")
+
+
+@router.get("/unified/running")
+async def get_running_sync():
+    """获取当前正在运行的同步任务（页面刷新后恢复进度）"""
+    running_tasks = []
+
+    # 1. 检查统一同步内存任务
+    unified = get_unified_sync_service()
+    for job_id, status in list(unified._running_jobs.items()):
+        if status.get("status") == "running":
+            running_tasks.append({
+                "type": "unified",
+                "job_id": job_id,
+                "status": "running",
+                "total_steps": status.get("total_steps", 0),
+                "completed_steps": status.get("completed_steps", 0),
+                "current_step": status.get("current_step", ""),
+                "started_at": status.get("started_at"),
+                "results": status.get("results", []),
+            })
+
+    # 2. 检查 scheduler_executions 中未完成的统一同步
+    try:
+        from app.services.scheduler_service import get_scheduler_service
+        svc = get_scheduler_service()
+        if svc and svc.db:
+            cursor = svc.db.scheduler_executions.find({
+                "job_id": {"$regex": "^unified_sync_"},
+                "status": "running",
+            }).sort("timestamp", -1)
+            async for doc in cursor:
+                doc.pop("_id", None)
+                running_tasks.append({
+                    "type": "unified",
+                    "job_id": doc.get("job_id"),
+                    "status": "running",
+                    "progress": doc.get("progress", 0),
+                    "progress_message": doc.get("progress_message", ""),
+                    "started_at": str(doc.get("timestamp", "")),
+                    "is_legacy_record": True,
+                })
+    except Exception:
+        pass
+
+    # 3. 检查 AKShare 初始化任务
+    try:
+        from app.routers.akshare_init import _initialization_status
+        if _initialization_status.get("is_running"):
+            running_tasks.append({
+                "type": "akshare_init",
+                "job_id": "akshare_init",
+                "status": "running",
+                "current_task": _initialization_status.get("current_task"),
+                "start_time": str(_initialization_status.get("start_time", "")),
+                "progress": _initialization_status.get("progress"),
+            })
+    except Exception:
+        pass
+
+    return SyncResponse(
+        success=True,
+        message=f"发现 {len(running_tasks)} 个运行中的任务",
+        data={"running_tasks": running_tasks},
+    )

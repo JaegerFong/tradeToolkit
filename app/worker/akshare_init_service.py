@@ -66,7 +66,8 @@ class AKShareInitService:
         skip_if_exists: bool = True,
         batch_size: int = 100,
         enable_multi_period: bool = False,
-        sync_items: List[str] = None
+        sync_items: List[str] = None,
+        progress_callback: callable = None,
     ) -> Dict[str, Any]:
         """
         运行完整的数据初始化
@@ -198,6 +199,8 @@ class AKShareInitService:
         
         self.stats.completed_steps += 1
         logger.info(f"✅ {self.stats.current_step}完成")
+        if progress_callback:
+            progress_callback(self.stats.current_step, self.stats.completed_steps, self.stats.total_steps)
     
     async def _step_initialize_basic_info(self):
         """步骤2: 初始化股票基础信息"""
@@ -404,6 +407,8 @@ class AKShareInitService:
         
         self.stats.completed_steps += 1
         logger.info(f"✅ {self.stats.current_step}完成")
+        if progress_callback:
+            progress_callback(self.stats.current_step, self.stats.completed_steps, self.stats.total_steps)
     
     def _get_initialization_summary(self) -> Dict[str, Any]:
         """获取初始化总结"""

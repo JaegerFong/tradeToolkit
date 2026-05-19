@@ -121,9 +121,6 @@ TUSHARE_TOKEN=your_tushare_token_here
 # AKShare配置
 AKSHARE_ENABLED=true
 
-# BaoStock配置
-BAOSTOCK_ENABLED=true
-
 # 默认数据源
 DEFAULT_CHINA_DATA_SOURCE={{ recommendations.primary_source?.name || 'tushare' }}</code></pre>
                   </div>

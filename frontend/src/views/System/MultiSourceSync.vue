@@ -31,16 +31,16 @@
       <el-row :gutter="24">
         <!-- 左侧列 -->
         <el-col :lg="12" :md="24" :sm="24">
-          <!-- 策略行情数据 -->
+          <!-- 代理配置 -->
           <div class="content-section">
-            <StrategyDataSync />
+            <ProxyConfigPanel />
           </div>
 
           <!-- 数据源状态 -->
           <div class="content-section">
             <DataSourceStatus ref="dataSourceStatusRef" />
           </div>
-          
+
           <!-- 使用建议 -->
           <div class="content-section">
             <SyncRecommendations />
@@ -49,16 +49,16 @@
 
         <!-- 右侧列 -->
         <el-col :lg="12" :md="24" :sm="24">
-          <!-- 同步控制 -->
+          <!-- 统一数据同步 -->
           <div class="content-section">
-            <SyncControl @sync-completed="handleSyncCompleted" />
+            <UnifiedSyncPanel />
           </div>
 
           <!-- 股票同步覆盖明细 -->
           <div class="content-section">
             <StockSyncCoverage />
           </div>
-          
+
           <!-- 同步历史 -->
           <div class="content-section">
             <SyncHistory />
@@ -138,11 +138,11 @@ import {
   Download
 } from '@element-plus/icons-vue'
 import { testDataSources, type DataSourceTestResult } from '@/api/sync'
+import UnifiedSyncPanel from '@/components/Sync/UnifiedSyncPanel.vue'
+import ProxyConfigPanel from '@/components/Sync/ProxyConfigPanel.vue'
 import DataSourceStatus from '@/components/Sync/DataSourceStatus.vue'
-import SyncControl from '@/components/Sync/SyncControl.vue'
 import SyncRecommendations from '@/components/Sync/SyncRecommendations.vue'
 import SyncHistory from '@/components/Sync/SyncHistory.vue'
-import StrategyDataSync from '@/components/Sync/StrategyDataSync.vue'
 import StockSyncCoverage from '@/components/Sync/StockSyncCoverage.vue'
 
 // 响应式数据
@@ -210,14 +210,6 @@ const exportTestResults = () => {
   URL.revokeObjectURL(url)
   
   ElMessage.success('测试结果已导出')
-}
-
-// 处理同步完成事件
-const handleSyncCompleted = (status: string) => {
-  console.log('🎉 收到同步完成事件，状态:', status)
-  // 这里可以触发历史记录刷新
-  // 由于我们使用了组件引用，可以直接调用子组件的刷新方法
-  // 或者发射一个全局事件让历史组件监听
 }
 </script>
 

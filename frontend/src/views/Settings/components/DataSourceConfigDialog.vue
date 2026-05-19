@@ -295,7 +295,7 @@ const isEdit = computed(() => !!props.config)
 const needsApiSecret = computed(() => {
   const type = formData.value.type?.toLowerCase() || ''
   // 某些数据源类型需要 API Secret
-  return ['alpha_vantage', 'wind', 'choice'].includes(type)
+  return ['wind', 'choice'].includes(type)
 })
 
 // 当前选中的数据源信息
@@ -370,38 +370,6 @@ const dataSourceTypes = [
     value: 'akshare',
     register_url: 'https://akshare.akfamily.xyz/',
     register_guide: 'AKShare 是开源免费的金融数据接口库，无需注册即可使用。访问官网了解更多：'
-  },
-  {
-    label: 'BaoStock',
-    value: 'baostock',
-    register_url: 'http://baostock.com/',
-    register_guide: 'BaoStock 是开源免费的证券数据平台，无需注册即可使用。访问官网了解更多：'
-  },
-
-  // 美股数据源
-  {
-    label: 'Finnhub',
-    value: 'finnhub',
-    register_url: 'https://finnhub.io/register',
-    register_guide: '如果您还没有 Finnhub 账号，请先注册并获取 API Key：'
-  },
-  {
-    label: 'Yahoo Finance',
-    value: 'yahoo_finance',
-    register_url: 'https://finance.yahoo.com/',
-    register_guide: 'Yahoo Finance 提供免费的金融数据，部分功能无需注册。访问官网了解更多：'
-  },
-  {
-    label: 'Alpha Vantage',
-    value: 'alpha_vantage',
-    register_url: 'https://www.alphavantage.co/support/#api-key',
-    register_guide: '如果您还没有 Alpha Vantage 账号，请先注册并获取免费 API Key：'
-  },
-  {
-    label: 'IEX Cloud',
-    value: 'iex_cloud',
-    register_url: 'https://iexcloud.io/cloud-login#/register',
-    register_guide: '如果您还没有 IEX Cloud 账号，请先注册并获取 API Token：'
   },
 
   // 专业数据源

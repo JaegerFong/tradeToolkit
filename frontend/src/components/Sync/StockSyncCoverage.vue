@@ -26,7 +26,6 @@
         <el-select v-model="filters.source" clearable placeholder="基础数据源" style="width: 150px" @change="search">
           <el-option label="AKShare" value="akshare" />
           <el-option label="Tushare" value="tushare" />
-          <el-option label="BaoStock" value="baostock" />
         </el-select>
         <el-button type="primary" :icon="Search" @click="search">查询</el-button>
       </div>

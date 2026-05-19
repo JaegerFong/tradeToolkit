@@ -70,10 +70,6 @@
 
       <!-- 右侧：配置内容 -->
       <el-col :span="20">
-        <!-- 配置验证 -->
-        <div v-show="activeTab === 'validation'">
-          <ConfigValidator />
-        </div>
 
         <!-- 模型目录管理 -->
         <div v-show="activeTab === 'model-catalog'">
@@ -681,7 +677,6 @@
 
 
             <el-form-item label="港股最小请求间隔">
-              <el-input-number v-model="systemSettings.ta_hk_min_request_interval_seconds" :min="0.1" :step="0.1" :disabled="!isEditable('ta_hk_min_request_interval_seconds')" />
               <span class="setting-description">秒</span>
               <el-tooltip effect="dark" content="港股数据请求的最小间隔，用于节流" placement="top">
                 <i class="el-icon-info" style="margin-left:8px; color:#909399;" />
@@ -689,21 +684,17 @@
             </el-form-item>
 
             <el-form-item label="港股请求超时">
-              <el-input-number v-model="systemSettings.ta_hk_timeout_seconds" :min="1" :step="1" :disabled="!isEditable('ta_hk_timeout_seconds')" />
               <span class="setting-description">秒</span>
             </el-form-item>
 
             <el-form-item label="港股最大重试">
-              <el-input-number v-model="systemSettings.ta_hk_max_retries" :min="0" :step="1" :disabled="!isEditable('ta_hk_max_retries')" />
             </el-form-item>
 
             <el-form-item label="港股限速等待">
-              <el-input-number v-model="systemSettings.ta_hk_rate_limit_wait_seconds" :min="1" :step="1" :disabled="!isEditable('ta_hk_rate_limit_wait_seconds')" />
               <span class="setting-description">秒</span>
             </el-form-item>
 
             <el-form-item label="港股缓存TTL">
-              <el-input-number v-model="systemSettings.ta_hk_cache_ttl_seconds" :min="10" :step="10" :disabled="!isEditable('ta_hk_cache_ttl_seconds')" />
               <span class="setting-description">秒</span>
             </el-form-item>
 
@@ -713,7 +704,6 @@
             </el-form-item>
 
             <el-form-item label="美股最小调用间隔">
-              <el-input-number v-model="systemSettings.ta_us_min_api_interval_seconds" :min="0.1" :step="0.1" :disabled="!isEditable('ta_us_min_api_interval_seconds')" />
               <span class="setting-description">秒</span>
             </el-form-item>
 
@@ -1114,7 +1104,6 @@ import {
   type DataSourceGrouping,
   type SettingMeta
 } from '@/api/config'
-import ConfigValidator from '@/components/ConfigValidator.vue'
 import LLMConfigDialog from './components/LLMConfigDialog.vue'
 import ProviderDialog from './components/ProviderDialog.vue'
 import ModelCatalogManagement from './components/ModelCatalogManagement.vue'
@@ -1504,13 +1493,7 @@ const loadSystemSettings = async () => {
       sse_batch_max_idle_seconds: 600,
       // TradingAgents（可选）默认
       ta_use_app_cache: false,
-      ta_hk_min_request_interval_seconds: 2.0,
-      ta_hk_timeout_seconds: 60,
-      ta_hk_max_retries: 3,
-      ta_hk_rate_limit_wait_seconds: 60,
-      ta_hk_cache_ttl_seconds: 86400,
       ta_china_min_api_interval_seconds: 0.5,
-      ta_us_min_api_interval_seconds: 1.0,
       ta_google_news_sleep_min_seconds: 2.0,
       ta_google_news_sleep_max_seconds: 6.0,
       app_timezone: 'Asia/Shanghai',
@@ -2082,13 +2065,7 @@ const saveSystemSettings = async () => {
       { key: 'sse_batch_poll_interval_seconds', min: 0.000001 },
       { key: 'sse_batch_max_idle_seconds', min: 1 },
       // TradingAgents（可选）
-      { key: 'ta_hk_min_request_interval_seconds', min: 0.000001 },
-      { key: 'ta_hk_timeout_seconds', min: 1 },
-      { key: 'ta_hk_max_retries', min: 0 },
-      { key: 'ta_hk_rate_limit_wait_seconds', min: 1 },
-      { key: 'ta_hk_cache_ttl_seconds', min: 1 },
       { key: 'ta_china_min_api_interval_seconds', min: 0.000001 },
-      { key: 'ta_us_min_api_interval_seconds', min: 0.000001 },
       { key: 'ta_google_news_sleep_min_seconds', min: 0.000001 },
       { key: 'ta_google_news_sleep_max_seconds', min: 0.000001 },
     ]

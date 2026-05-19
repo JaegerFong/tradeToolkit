@@ -473,12 +473,20 @@ async def _run_strategy_data_sync_background(historical_days: int, force: bool):
     """后台运行策略数据同步"""
     global _initialization_status
 
+    def _on_progress(step_name: str, completed: int, total: int):
+        _initialization_status["progress"] = {
+            "current_step": step_name,
+            "completed_steps": completed,
+            "total_steps": total,
+        }
+
     try:
         service = await get_akshare_init_service()
         result = await service.run_full_initialization(
             historical_days=historical_days,
             skip_if_exists=not force,
-            sync_items=["basic_info", "historical"]
+            sync_items=["basic_info", "historical"],
+            progress_callback=_on_progress,
         )
 
         _initialization_status.update({
@@ -517,3 +525,192 @@ async def _run_basic_sync_background(force_update: bool):
             "result": {"success": False, "error": str(e)}
         })
         logger.error(f"基础信息同步后台任务失败: {e}")
+
+
+# ── AKShare 代理配置 API ──────────────────────────────────
+
+class ProxyConfigRequest(BaseModel):
+    """代理配置请求"""
+    proxy_mode: Optional[str] = Field(None, description="off / basic / strong")
+    proxy_api_url: Optional[str] = Field(None, description="动态代理 API 地址")
+    static_proxies: Optional[str] = Field(None, description="静态代理列表 (逗号分隔)")
+    proxy_cache_seconds: Optional[int] = Field(None, ge=10, le=3600)
+    proxy_rounds: Optional[int] = Field(None, ge=1, le=10)
+    include_direct: Optional[bool] = None
+    request_timeout: Optional[float] = Field(None, ge=5, le=120)
+    request_retries: Optional[int] = Field(None, ge=1, le=10)
+    min_request_interval: Optional[float] = Field(None, ge=0.1, le=30)
+    use_curl_cffi: Optional[bool] = None
+
+
+@router.get("/proxy-config")
+async def get_proxy_config():
+    """获取当前 AKShare 代理配置"""
+    import os
+    from tradingagents.dataflows.providers.china.akshare_network import get_network_stats
+
+    env_config = {
+        "proxy_mode": os.getenv("AKSHARE_PROXY_MODE", "strong"),
+        "proxy_api_url": os.getenv("AKSHARE_PROXY_API_URL", ""),
+        "static_proxies": os.getenv("AKSHARE_PROXIES", ""),
+        "proxy_cache_seconds": int(os.getenv("AKSHARE_PROXY_CACHE_SECONDS", "60")),
+        "proxy_rounds": int(os.getenv("AKSHARE_PROXY_ROUNDS", "2")),
+        "include_direct": os.getenv("AKSHARE_PROXY_INCLUDE_DIRECT", "true").lower() not in ("0", "false", "no"),
+        "request_timeout": float(os.getenv("AKSHARE_REQUEST_TIMEOUT", "20")),
+        "request_retries": int(os.getenv("AKSHARE_REQUEST_RETRIES", "4")),
+        "min_request_interval": float(os.getenv("AKSHARE_MIN_REQUEST_INTERVAL",
+            os.getenv("AKSHARE_RATE_LIMIT_DELAY", "0.8"))),
+        "use_curl_cffi": os.getenv("AKSHARE_USE_CURL_CFFI", "true").lower() not in ("0", "false", "no"),
+    }
+
+    stats = {}
+    try:
+        stats = get_network_stats()
+    except Exception:
+        pass
+
+    return {
+        "success": True,
+        "data": {
+            "config": env_config,
+            "stats": stats,
+            "note": "配置修改后需重启后端服务生效",
+        }
+    }
+
+
+@router.post("/proxy-config")
+async def update_proxy_config(req: ProxyConfigRequest):
+    """更新 AKShare 代理配置（写入 .env 文件，需重启生效）"""
+    import os
+    from pathlib import Path
+
+    env_path = Path(".env")
+    if not env_path.exists():
+        raise HTTPException(status_code=500, detail=".env 文件不存在")
+
+    # 读取当前 .env
+    with open(env_path, "r") as f:
+        lines = f.readlines()
+
+    # 配置映射: 请求字段 → 环境变量名
+    mapping = {
+        "proxy_mode": "AKSHARE_PROXY_MODE",
+        "proxy_api_url": "AKSHARE_PROXY_API_URL",
+        "static_proxies": "AKSHARE_PROXIES",
+        "proxy_cache_seconds": "AKSHARE_PROXY_CACHE_SECONDS",
+        "proxy_rounds": "AKSHARE_PROXY_ROUNDS",
+        "include_direct": "AKSHARE_PROXY_INCLUDE_DIRECT",
+        "request_timeout": "AKSHARE_REQUEST_TIMEOUT",
+        "request_retries": "AKSHARE_REQUEST_RETRIES",
+        "min_request_interval": "AKSHARE_MIN_REQUEST_INTERVAL",
+        "use_curl_cffi": "AKSHARE_USE_CURL_CFFI",
+    }
+
+    updates = {}
+    for field, env_key in mapping.items():
+        val = getattr(req, field, None)
+        if val is not None:
+            updates[env_key] = "true" if isinstance(val, bool) and val else \
+                               "false" if isinstance(val, bool) else str(val)
+
+    if not updates:
+        raise HTTPException(status_code=400, detail="未提供任何配置项")
+
+    # 更新或追加
+    updated_keys = set()
+    new_lines = []
+    for line in lines:
+        stripped = line.strip()
+        matched = False
+        for env_key, new_val in updates.items():
+            if stripped.startswith(f"{env_key}=") or stripped.startswith(f"#{env_key}="):
+                new_lines.append(f"{env_key}={new_val}\n")
+                updated_keys.add(env_key)
+                matched = True
+                break
+        if not matched:
+            new_lines.append(line)
+
+    # 追加未更新的新配置
+    for env_key, new_val in updates.items():
+        if env_key not in updated_keys:
+            new_lines.append(f"\n{env_key}={new_val}\n")
+
+    with open(env_path, "w") as f:
+        f.writelines(new_lines)
+
+    return {
+        "success": True,
+        "message": "代理配置已更新，重启后端服务后生效",
+        "data": {"updated": list(updates.keys())},
+    }
+
+
+@router.post("/proxy-config/test")
+async def test_proxy_connection():
+    """测试当前代理配置的连通性"""
+    import time
+    import requests as req
+
+    proxy_mode = os.getenv("AKSHARE_PROXY_MODE", "strong")
+    proxy_api_url = os.getenv("AKSHARE_PROXY_API_URL", "").strip()
+
+    results = {"proxy_mode": proxy_mode, "tests": []}
+
+    if proxy_mode == "off":
+        results["tests"].append({"type": "direct", "status": "info", "message": "代理已关闭，使用直连模式"})
+        return {"success": True, "data": results}
+
+    # 测试动态代理 API
+    if proxy_mode == "strong" and proxy_api_url:
+        start = time.time()
+        try:
+            resp = req.get(proxy_api_url, timeout=10)
+            elapsed = time.time() - start
+            ips = [l.strip() for l in resp.text.replace("\r", "").split("\n") if l.strip()]
+            results["tests"].append({
+                "type": "proxy_api",
+                "status": "success",
+                "message": f"获取到 {len(ips)} 个代理 IP",
+                "elapsed": round(elapsed, 2),
+                "sample": ips[:3],
+            })
+        except Exception as e:
+            results["tests"].append({
+                "type": "proxy_api",
+                "status": "error",
+                "message": f"代理 API 请求失败: {str(e)}",
+                "elapsed": round(time.time() - start, 2),
+            })
+    elif proxy_mode == "strong" and not proxy_api_url:
+        results["tests"].append({"type": "proxy_api", "status": "warning", "message": "未配置代理 API 地址"})
+
+    # 测试静态代理
+    static_proxies = os.getenv("AKSHARE_PROXIES", "").strip()
+    if static_proxies:
+        proxies = [p.strip() for p in static_proxies.replace("\n", ",").split(",") if p.strip()]
+        results["tests"].append({"type": "static", "status": "info", "message": f"已配置 {len(proxies)} 个静态代理"})
+    else:
+        results["tests"].append({"type": "static", "status": "info", "message": "未配置静态代理"})
+
+    # 测试 eastmoney 连通性
+    start = time.time()
+    try:
+        resp = req.get("https://push2.eastmoney.com/api/qt/stock/get", timeout=10)
+        elapsed = time.time() - start
+        results["tests"].append({
+            "type": "eastmoney",
+            "status": "success" if resp.status_code == 200 else "warning",
+            "message": f"东方财富 API 可访问 (HTTP {resp.status_code})",
+            "elapsed": round(elapsed, 2),
+        })
+    except Exception as e:
+        results["tests"].append({
+            "type": "eastmoney",
+            "status": "error",
+            "message": f"东方财富 API 不可达: {str(e)}",
+            "elapsed": round(time.time() - start, 2),
+        })
+
+    return {"success": True, "data": results}
