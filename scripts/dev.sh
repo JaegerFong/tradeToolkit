@@ -1,4 +1,32 @@
 #!/usr/bin/env bash
+
+# 本地开发环境运行
+# 1.激活本地环境
+# conda create -n tradeToolkit python=3.10
+# pip install -e .
+# 2.创建mongodb和redis
+# 使用docker-compose-local-dev.yml文件启动MongoDB和Redis
+# docker compose -f docker-compose-local-dev.yml up -d
+# 使用admin账号登录，并进入shell创建用户
+# db.createUser({
+#   user: "traderx",
+#   pwd: "traderx2026",
+#   roles: [
+#     { role: "readWrite", db: "tradingagentscn" }
+#   ]
+# })
+# 3.创建.env文件
+# 4.安装前端依赖（已安装跳过）
+# cd frontend
+# npm install
+# 启动前端
+# cd frontend
+# npm run dev -- --host 0.0.0.0 --port 3000
+# 5.启动后端
+# conda activate trade
+# uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir app --reload-dir tradingagents
+
+
 # 本地开发启动脚本
 # 前提: MongoDB 和 Redis 已在本地运行
 # 用法:

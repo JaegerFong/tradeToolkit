@@ -40,15 +40,15 @@ def bridge_config_to_env():
         bridged_count += 1
 
         # 桥接 MongoDB 连接字符串
-        mongodb_conn_str = os.getenv("MONGODB_CONNECTION_STRING")
-        if mongodb_conn_str:
-            os.environ["MONGODB_CONNECTION_STRING"] = mongodb_conn_str
-            logger.info(f"  ✓ 桥接 MONGODB_CONNECTION_STRING (长度: {len(mongodb_conn_str)})")
-            bridged_count += 1
-
-        # 桥接 MongoDB 数据库名称
+        # 优先使用 MONGODB_CONNECTION_STRING，否则回退到主配置 MONGO_URI
         from app.core.config import settings
 
+        mongodb_conn_str = os.getenv("MONGODB_CONNECTION_STRING", "").strip() or settings.MONGO_URI
+        os.environ["MONGODB_CONNECTION_STRING"] = mongodb_conn_str
+        logger.info(f"  ✓ 桥接 MONGODB_CONNECTION_STRING")
+        bridged_count += 1
+
+        # 桥接 MongoDB 数据库名称
         mongodb_db_name = os.getenv("MONGODB_DATABASE_NAME", "").strip() or settings.MONGO_DB
         os.environ["MONGODB_DATABASE_NAME"] = mongodb_db_name
         if "MONGODB_DATABASE" not in os.environ or not os.environ["MONGODB_DATABASE"].strip():

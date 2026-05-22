@@ -49,6 +49,15 @@ class AKShareAdapter(DataSourceAdapter):
             logger.info("AKShare: Fetching stock list with real names from stock_info_a_code_name()...")
 
             # 使用 AKShare 的 stock_info_a_code_name 接口获取股票代码和名称
+            # 注册 openpyxl 为默认 Excel 引擎，修复 pandas 2.3.x 引擎检测问题
+            import pandas as _pd
+            if not hasattr(_pd.read_excel, '_engine_patched'):
+                _orig = _pd.read_excel
+                def _patched(*args, engine='openpyxl', **kwargs):
+                    return _orig(*args, engine=engine, **kwargs)
+                _pd.read_excel = _patched
+                _pd.read_excel._engine_patched = True
+
             df = ak.stock_info_a_code_name()
 
             if df is None or df.empty:

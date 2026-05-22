@@ -13,6 +13,7 @@
 """
 
 import sys
+import os
 import hashlib
 from datetime import datetime
 from pathlib import Path
@@ -25,31 +26,69 @@ sys.path.insert(0, str(project_root))
 from pymongo import MongoClient
 
 
-# 配置
-MONGO_URI = "mongodb://admin:tradingagents123@localhost:27017/tradingagentscn?authSource=admin"
-DB_NAME = "tradingagentscn"
+def _load_env(env_path: Path):
+    """简单解析 .env 文件，避免依赖 python-dotenv"""
+    if not env_path.exists():
+        return
+    with open(env_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" in line:
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+
+
+_load_env(project_root / ".env")
 
 
 def hash_password(password: str) -> str:
-    """使用 SHA256 哈希密码（与系统一致）"""
+    """使用 SHA256 哈希密码（与 user_service 一致，不加 salt）"""
     return hashlib.sha256(password.encode()).hexdigest()
 
 
-def connect_mongodb() -> MongoClient:
+def get_mongo_config():
+    """从 .env 读取 MongoDB 配置，与 app/core/config.py 保持一致"""
+    host = os.getenv("MONGODB_HOST", "localhost")
+    port = os.getenv("MONGODB_PORT", "27017")
+    username = os.getenv("MONGODB_USERNAME", "")
+    password = os.getenv("MONGODB_PASSWORD", "")
+    auth_source = os.getenv("MONGODB_AUTH_SOURCE", "admin")
+    database = os.getenv("MONGODB_DATABASE", "tradingagentscn")
+    scope = os.getenv("MONGODB_DATABASE_SCOPE", "auto")
+    debug = os.getenv("DEBUG", "true").lower() == "true"
+
+    if username and password:
+        uri = f"mongodb://{username}:{password}@{host}:{port}/?authSource={auth_source}"
+    else:
+        uri = f"mongodb://{host}:{port}/"
+
+    # scope 计算，与 config.py MONGO_DB 属性一致
+    if scope == "explicit" or not debug:
+        db_name = database
+    else:
+        db_name = database  # 简化：explicit 模式直接使用 database
+
+    return uri, db_name
+
+
+def connect_mongodb(uri: str) -> MongoClient:
     """连接到 MongoDB"""
-    print(f"🔌 连接到 MongoDB...")
-    
+    print(f"🔌 连接到 MongoDB: {uri}")
+
     try:
-        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-        # 测试连接
+        client = MongoClient(uri, serverSelectionTimeoutMS=5000)
         client.admin.command('ping')
         print(f"✅ MongoDB 连接成功")
         return client
-    
+
     except Exception as e:
         print(f"❌ 错误: MongoDB 连接失败: {e}")
-        print(f"   请确保 MongoDB 容器正在运行")
-        print(f"   运行: docker ps | grep mongodb")
+        print(f"   请检查 .env 中的 MongoDB 配置")
         sys.exit(1)
 
 
@@ -203,9 +242,12 @@ def main():
     print("=" * 80)
     print()
     
+    # 从 .env 读取连接配置
+    mongo_uri, db_name = get_mongo_config()
+
     # 连接数据库
-    client = connect_mongodb()
-    db = client[DB_NAME]
+    client = connect_mongodb(mongo_uri)
+    db = client[db_name]
     
     # 列出用户
     if args.list:

@@ -88,7 +88,13 @@ class TushareProvider(BaseStockDataProvider):
     def connect_sync(self) -> bool:
         """同步连接到Tushare"""
         if not TUSHARE_AVAILABLE:
-            self.logger.error("❌ Tushare库不可用")
+            self.logger.warning("⚠️ Tushare库不可用")
+            return False
+
+        # 检查是否启用了 Tushare
+        from app.core.config import settings
+        if not getattr(settings, "TUSHARE_ENABLED", False) and not getattr(settings, "TUSHARE_UNIFIED_ENABLED", False):
+            self.logger.info("ℹ️ Tushare 未启用，跳过连接")
             return False
 
         # 测试连接超时时间（秒）- 只是测试连通性，不需要很长时间
@@ -175,7 +181,13 @@ class TushareProvider(BaseStockDataProvider):
     async def connect(self) -> bool:
         """异步连接到Tushare"""
         if not TUSHARE_AVAILABLE:
-            self.logger.error("❌ Tushare库不可用")
+            self.logger.warning("⚠️ Tushare库不可用")
+            return False
+
+        # 检查是否启用了 Tushare
+        from app.core.config import settings
+        if not getattr(settings, "TUSHARE_ENABLED", False) and not getattr(settings, "TUSHARE_UNIFIED_ENABLED", False):
+            self.logger.info("ℹ️ Tushare 未启用，跳过连接")
             return False
 
         # 测试连接超时时间（秒）- 只是测试连通性，不需要很长时间
