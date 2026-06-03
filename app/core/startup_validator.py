@@ -49,23 +49,23 @@ class StartupValidator:
     # 必需配置项
     REQUIRED_CONFIGS = [
         ConfigItem(
-            key="MONGODB_HOST",
+            key="PG_HOST",
             level=ConfigLevel.REQUIRED,
-            description="MongoDB主机地址",
-            example="localhost"
+            description="PostgreSQL 主机地址",
+            example="localhost",
         ),
         ConfigItem(
-            key="MONGODB_PORT",
+            key="PG_PORT",
             level=ConfigLevel.REQUIRED,
-            description="MongoDB端口",
-            example="27017",
-            validator=lambda v: v.isdigit() and 1 <= int(v) <= 65535
+            description="PostgreSQL 端口",
+            example="5432",
+            validator=lambda v: v.isdigit() and 1 <= int(v) <= 65535,
         ),
         ConfigItem(
-            key="MONGODB_DATABASE",
+            key="PG_DATABASE",
             level=ConfigLevel.REQUIRED,
-            description="MongoDB数据库名称",
-            example="tradingagents"
+            description="PostgreSQL 数据库名称 (tdx2db K线 + 业务数据)",
+            example="tradingagents",
         ),
         ConfigItem(
             key="REDIS_HOST",
@@ -235,28 +235,7 @@ class StartupValidator:
         else:
             logger.info("ℹ️  开发环境模式（DEBUG=true）")
 
-        # 检查开发环境是否误连共享数据库
-        db_identity = settings.MONGO_DB_IDENTITY
-        if (
-            settings.DEBUG
-            and db_identity.get("scope_effective") != "major_instance"
-            and not settings.ALLOW_SHARED_DB_IN_DEBUG
-        ):
-            self.result.invalid_configs.append(
-                (
-                    ConfigItem(
-                        key="MONGODB_DATABASE_SCOPE",
-                        level=ConfigLevel.REQUIRED,
-                        description="开发环境应默认使用 major_instance 隔离数据库",
-                        example="major_instance",
-                    ),
-                    (
-                        "DEBUG=true 时当前数据库作用域为 "
-                        f"{db_identity.get('scope_effective')}，实际数据库为 {db_identity.get('database')}。"
-                        " 如确需共享数据库，请显式设置 ALLOW_SHARED_DB_IN_DEBUG=true。"
-                    ),
-                )
-            )
+        # PostgreSQL 数据库连接检查（启动时由 database.py 验证）
     
     def _print_validation_result(self):
         """输出验证结果"""

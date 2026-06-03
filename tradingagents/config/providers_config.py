@@ -20,17 +20,6 @@ class DataSourceConfig:
     
     def _load_configs(self):
         """加载所有数据源配置"""
-        # Tushare配置
-        self._configs["tushare"] = {
-            "enabled": self._get_bool_env("TUSHARE_ENABLED", True),
-            "token": os.getenv("TUSHARE_TOKEN", ""),
-            "timeout": self._get_int_env("TUSHARE_TIMEOUT", 30),
-            "rate_limit": self._get_float_env("TUSHARE_RATE_LIMIT", 0.1),
-            "max_retries": self._get_int_env("TUSHARE_MAX_RETRIES", 3),
-            "cache_enabled": self._get_bool_env("TUSHARE_CACHE_ENABLED", True),
-            "cache_ttl": self._get_int_env("TUSHARE_CACHE_TTL", 3600),
-        }
-        
         # AKShare配置
         self._configs["akshare"] = {
             "enabled": self._get_bool_env("AKSHARE_ENABLED", True),

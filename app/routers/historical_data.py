@@ -21,7 +21,7 @@ class HistoricalDataQuery(BaseModel):
     symbol: str = Field(..., description="股票代码")
     start_date: Optional[str] = Field(None, description="开始日期 (YYYY-MM-DD)")
     end_date: Optional[str] = Field(None, description="结束日期 (YYYY-MM-DD)")
-    data_source: Optional[str] = Field(None, description="数据源 (tushare/akshare/baostock)")
+    data_source: Optional[str] = Field(None, description="数据源 (akshare/baostock)")
     period: Optional[str] = Field(None, description="数据周期 (daily/weekly/monthly)")
     limit: Optional[int] = Field(None, ge=1, le=1000, description="限制返回数量")
 
@@ -38,7 +38,7 @@ async def get_historical_data(
     symbol: str,
     start_date: Optional[str] = Query(None, description="开始日期 (YYYY-MM-DD)"),
     end_date: Optional[str] = Query(None, description="结束日期 (YYYY-MM-DD)"),
-    data_source: Optional[str] = Query(None, description="数据源 (tushare/akshare/baostock)"),
+    data_source: Optional[str] = Query(None, description="数据源 (akshare/baostock)"),
     period: Optional[str] = Query(None, description="数据周期 (daily/weekly/monthly)"),
     limit: Optional[int] = Query(None, ge=1, le=1000, description="限制返回数量")
 ):
@@ -131,7 +131,7 @@ async def query_historical_data(request: HistoricalDataQuery):
 @router.get("/latest-date/{symbol}")
 async def get_latest_date(
     symbol: str,
-    data_source: str = Query(..., description="数据源 (tushare/akshare/baostock)")
+    data_source: str = Query(..., description="数据源 (akshare/baostock)")
 ):
     """获取股票最新数据日期"""
     try:
@@ -183,7 +183,7 @@ async def compare_data_sources(
         service = await get_historical_data_service()
         
         # 查询三个数据源的数据
-        sources = ["tushare", "akshare", "baostock"]
+        sources = ["akshare", "baostock"]
         comparison = {}
         
         for source in sources:

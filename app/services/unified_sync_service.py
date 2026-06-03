@@ -8,6 +8,11 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, List, Optional
 
+from sqlalchemy import select
+
+from app.core.database import async_session_factory
+from app.core.pg_models import UserFavorite
+
 logger = logging.getLogger(__name__)
 
 # 支持的同步项
@@ -82,8 +87,6 @@ class UnifiedSyncService:
         steps = []
         for item in config.sync_items:
             for source in config.data_sources:
-                if item == "news" and source == "tushare":
-                    continue  # Tushare 新闻同步暂不支持
                 steps.append({"item": item, "source": source})
         return steps
 
@@ -114,7 +117,7 @@ class UnifiedSyncService:
 
                 # 标记步骤开始执行
                 self._running_jobs[job_id]["current_step"] = step_name
-                self._running_jobs[job_id]["completed_steps"] = idx  # 已完成 idx 步，正在执行第 idx+1 步
+                self._running_jobs[job_id]["completed_steps"] = idx
                 self._update_progress(job_id, idx, total_steps, step_name)
 
                 try:
@@ -156,12 +159,6 @@ class UnifiedSyncService:
                 from app.worker.akshare_sync_service import get_akshare_sync_service
                 svc = await get_akshare_sync_service()
                 return await svc.sync_stock_basic_info(force_update=not config.is_incremental)
-            elif source == "tushare":
-                from app.worker.tushare_sync_service import get_tushare_sync_service
-                svc = await get_tushare_sync_service()
-                return await svc.sync_stock_basic_info(
-                    force_update=not config.is_incremental, job_id=job_id
-                )
 
         # 实时行情
         elif item == "quotes":
@@ -169,10 +166,6 @@ class UnifiedSyncService:
             if source == "akshare":
                 from app.worker.akshare_sync_service import get_akshare_sync_service
                 svc = await get_akshare_sync_service()
-                return await svc.sync_realtime_quotes(symbols=symbols, force=config.is_full)
-            elif source == "tushare":
-                from app.worker.tushare_sync_service import get_tushare_sync_service
-                svc = await get_tushare_sync_service()
                 return await svc.sync_realtime_quotes(symbols=symbols, force=config.is_full)
 
         # 历史数据（日/周/月）
@@ -194,18 +187,6 @@ class UnifiedSyncService:
                     incremental=incremental,
                     period=period,
                 )
-            elif source == "tushare":
-                from app.worker.tushare_sync_service import get_tushare_sync_service
-                svc = await get_tushare_sync_service()
-                return await svc.sync_historical_data(
-                    symbols=symbols,
-                    start_date=start_date if config.is_date_range else None,
-                    end_date=end_date,
-                    incremental=incremental,
-                    all_history=config.is_full,
-                    period=period,
-                    job_id=job_id,
-                )
 
         # 财务数据
         elif item == "financial":
@@ -214,10 +195,6 @@ class UnifiedSyncService:
                 from app.worker.akshare_sync_service import get_akshare_sync_service
                 svc = await get_akshare_sync_service()
                 return await svc.sync_financial_data(symbols=symbols)
-            elif source == "tushare":
-                from app.worker.tushare_sync_service import get_tushare_sync_service
-                svc = await get_tushare_sync_service()
-                return await svc.sync_financial_data(symbols=symbols, job_id=job_id)
 
         # 新闻数据
         elif item == "news":
@@ -245,18 +222,11 @@ class UnifiedSyncService:
     async def _get_favorite_symbols(self) -> List[str]:
         """获取自选股列表"""
         try:
-            from app.core.database import get_mongo_db
-            db = get_mongo_db()
-            symbols = set()
-            async for doc in db.users.find({"favorite_stocks": {"$exists": True}}):
-                for s in doc.get("favorite_stocks", []):
-                    if isinstance(s, str):
-                        symbols.add(s)
-            async for doc in db.user_favorites.find({}):
-                code = doc.get("code") or doc.get("symbol")
-                if code:
-                    symbols.add(str(code))
-            return list(symbols)
+            async with async_session_factory() as session:
+                result = await session.execute(
+                    select(UserFavorite.stock_code).distinct()
+                )
+                return [row[0] for row in result.all() if row[0]]
         except Exception as e:
             logger.warning(f"获取自选股失败: {e}")
             return []
@@ -283,17 +253,7 @@ class UnifiedSyncService:
         """检查任务是否被取消"""
         if job_id not in self._running_jobs:
             return False
-        try:
-            from app.core.database import get_mongo_db
-            db = get_mongo_db()
-            import asyncio as _asyncio
-            loop = _asyncio.get_event_loop()
-            if loop.is_running():
-                # Can't run sync MongoDB in async context easily
-                return False
-            return False
-        except Exception:
-            return False
+        return False
 
     def get_job_status(self, job_id: str) -> Optional[Dict[str, Any]]:
         """查询任务状态"""

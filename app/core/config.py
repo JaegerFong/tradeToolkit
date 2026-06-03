@@ -3,9 +3,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List
 import os
 import warnings
-import re
-import getpass
-from pathlib import Path
 
 # Legacy env var aliases (deprecated): map API_HOST/PORT/DEBUG -> HOST/PORT/DEBUG
 _LEGACY_ENV_ALIASES = {
@@ -30,78 +27,29 @@ class Settings(BaseSettings):
     ALLOWED_ORIGINS: List[str] = Field(default_factory=lambda: ["*"])
     ALLOWED_HOSTS: List[str] = Field(default_factory=lambda: ["*"])
 
-    # MongoDB配置
-    MONGODB_HOST: str = Field(default="localhost")
-    MONGODB_PORT: int = Field(default=27017)
-    MONGODB_USERNAME: str = Field(default="")
-    MONGODB_PASSWORD: str = Field(default="")
-    MONGODB_DATABASE: str = Field(default="tradingagentscn")
-    MONGODB_DATABASE_SCOPE: str = Field(default="auto")
-    MONGODB_DATABASE_INSTANCE: str = Field(default="")
-    ALLOW_SHARED_DB_IN_DEBUG: bool = Field(default=False)
-    MONGODB_AUTH_SOURCE: str = Field(default="admin")
-    MONGO_MAX_CONNECTIONS: int = Field(default=100)
-    MONGO_MIN_CONNECTIONS: int = Field(default=10)
-    # MongoDB超时参数（毫秒）- 用于处理大量历史数据
-    MONGO_CONNECT_TIMEOUT_MS: int = Field(default=30000)  # 连接超时：30秒（原为10秒）
-    MONGO_SOCKET_TIMEOUT_MS: int = Field(default=60000)   # 套接字超时：60秒（原为20秒）
-    MONGO_SERVER_SELECTION_TIMEOUT_MS: int = Field(default=5000)  # 服务器选择超时：5秒
+    # PostgreSQL 配置
+    PG_HOST: str = Field(default="localhost")
+    PG_PORT: int = Field(default=5432)
+    PG_USER: str = Field(default="")
+    PG_PASSWORD: str = Field(default="")
+    PG_DATABASE: str = Field(default="tradingagents")
+    PG_APP_SCHEMA: str = Field(default="tradetoolkit")
+    PG_MIN_CONNECTIONS: int = Field(default=5)
+    PG_MAX_CONNECTIONS: int = Field(default=20)
+    PG_CONNECT_TIMEOUT: int = Field(default=30)
+    PG_POOL_RECYCLE: int = Field(default=3600)
 
     @property
-    def MONGO_URI(self) -> str:
-        """构建MongoDB URI"""
-        if self.MONGODB_USERNAME and self.MONGODB_PASSWORD:
-            return f"mongodb://{self.MONGODB_USERNAME}:{self.MONGODB_PASSWORD}@{self.MONGODB_HOST}:{self.MONGODB_PORT}/{self.MONGO_DB}?authSource={self.MONGODB_AUTH_SOURCE}"
-        else:
-            return f"mongodb://{self.MONGODB_HOST}:{self.MONGODB_PORT}/{self.MONGO_DB}"
+    def PG_URI(self) -> str:
+        """构建异步 PostgreSQL URI (asyncpg)"""
+        auth = f"{self.PG_USER}:{self.PG_PASSWORD}@" if self.PG_USER else ""
+        return f"postgresql+asyncpg://{auth}{self.PG_HOST}:{self.PG_PORT}/{self.PG_DATABASE}"
 
     @property
-    def MONGO_DB(self) -> str:
-        """获取数据库名称"""
-        scope = (self.MONGODB_DATABASE_SCOPE or "").strip().lower()
-        if not scope or scope == "auto":
-            scope = "major_instance" if self.DEBUG else "explicit"
-
-        if scope == "explicit":
-            return self.MONGODB_DATABASE
-
-        base = self.MONGODB_DATABASE
-        major = _read_major_version()
-
-        if scope == "major":
-            name = f"{base}_v{major}"
-            return _sanitize_mongo_db_name(name)
-
-        if scope == "major_instance":
-            instance = (self.MONGODB_DATABASE_INSTANCE or "").strip()
-            if not instance:
-                instance = _default_instance_tag()
-            name = f"{base}_v{major}_{instance}"
-            return _sanitize_mongo_db_name(name)
-
-        return _sanitize_mongo_db_name(base)
-
-    @property
-    def MONGO_DB_IDENTITY(self) -> dict:
-        scope = (self.MONGODB_DATABASE_SCOPE or "").strip().lower() or "auto"
-        if scope == "auto":
-            resolved_scope = "major_instance" if self.DEBUG else "explicit"
-        else:
-            resolved_scope = scope
-
-        major = _read_major_version()
-        instance = (self.MONGODB_DATABASE_INSTANCE or "").strip()
-        if resolved_scope == "major_instance" and not instance:
-            instance = _default_instance_tag()
-
-        return {
-            "base_database": self.MONGODB_DATABASE,
-            "scope_configured": scope,
-            "scope_effective": resolved_scope,
-            "major_version": major,
-            "instance": instance,
-            "database": self.MONGO_DB,
-        }
+    def PG_SYNC_URI(self) -> str:
+        """构建同步 PostgreSQL URI (psycopg2)"""
+        auth = f"{self.PG_USER}:{self.PG_PASSWORD}@" if self.PG_USER else ""
+        return f"postgresql+psycopg2://{auth}{self.PG_HOST}:{self.PG_PORT}/{self.PG_DATABASE}"
 
     # Redis配置
     REDIS_HOST: str = Field(default="localhost")
@@ -158,7 +106,7 @@ class Settings(BaseSettings):
     HTTP_PROXY: str = Field(default="")
     HTTPS_PROXY: str = Field(default="")
     NO_PROXY: str = Field(
-        default="localhost,127.0.0.1,eastmoney.com,push2.eastmoney.com,82.push2.eastmoney.com,82.push2delay.eastmoney.com,gtimg.cn,sinaimg.cn,api.tushare.pro"
+        default="localhost,127.0.0.1,eastmoney.com,push2.eastmoney.com,82.push2.eastmoney.com,82.push2delay.eastmoney.com,gtimg.cn,sinaimg.cn"
     )
 
     # 文件上传配置
@@ -207,71 +155,14 @@ class Settings(BaseSettings):
     # 时区
     TIMEZONE: str = Field(default="Asia/Shanghai")
 
-    # 实时行情入库任务
-    QUOTES_INGEST_ENABLED: bool = Field(default=True)
-    QUOTES_INGEST_INTERVAL_SECONDS: int = Field(
-        default=360,
-        description="实时行情采集间隔（秒）。默认360秒（6分钟），免费用户建议>=300秒，付费用户可设置5-60秒"
-    )
-    # 休市期/启动兜底补数（填充上一笔快照）
-    QUOTES_BACKFILL_ON_STARTUP: bool = Field(default=True)
-    QUOTES_BACKFILL_ON_OFFHOURS: bool = Field(default=True)
-
-    # 实时行情接口轮换配置
-    QUOTES_ROTATION_ENABLED: bool = Field(
-        default=True,
-        description="启用接口轮换机制（Tushare → AKShare东方财富 → AKShare新浪财经）"
-    )
-    QUOTES_TUSHARE_HOURLY_LIMIT: int = Field(
-        default=2,
-        description="Tushare rt_k接口每小时调用次数限制（免费用户2次，付费用户可设置更高）"
-    )
-    QUOTES_AUTO_DETECT_TUSHARE_PERMISSION: bool = Field(
-        default=True,
-        description="自动检测Tushare rt_k接口权限，付费用户自动切换到高频模式（5秒）"
-    )
-
-    # Tushare基础配置
-    TUSHARE_TOKEN: str = Field(default="", description="Tushare API Token")
-    TUSHARE_ENABLED: bool = Field(default=True, description="启用Tushare数据源")
-    TUSHARE_TIER: str = Field(default="standard", description="Tushare积分等级 (free/basic/standard/premium/vip)")
-    TUSHARE_RATE_LIMIT_SAFETY_MARGIN: float = Field(default=0.8, ge=0.1, le=1.0, description="速率限制安全边际")
-
-    # Tushare统一数据同步配置
-    TUSHARE_UNIFIED_ENABLED: bool = Field(default=True)
-    TUSHARE_BASIC_INFO_SYNC_ENABLED: bool = Field(default=True)
-    TUSHARE_BASIC_INFO_SYNC_CRON: str = Field(default="0 2 * * *")  # 每日凌晨2点
-    TUSHARE_QUOTES_SYNC_ENABLED: bool = Field(default=True)
-    TUSHARE_QUOTES_SYNC_CRON: str = Field(default="*/5 9-15 * * 1-5")  # 交易时间每5分钟
-    TUSHARE_HISTORICAL_SYNC_ENABLED: bool = Field(default=True)
-    TUSHARE_HISTORICAL_SYNC_CRON: str = Field(default="0 16 * * 1-5")  # 工作日16点
-    TUSHARE_FINANCIAL_SYNC_ENABLED: bool = Field(default=True)
-    TUSHARE_FINANCIAL_SYNC_CRON: str = Field(default="0 3 * * 0")  # 周日凌晨3点
-    TUSHARE_STATUS_CHECK_ENABLED: bool = Field(default=True)
-    TUSHARE_STATUS_CHECK_CRON: str = Field(default="0 * * * *")  # 每小时
-
-    # Tushare数据初始化配置
-    TUSHARE_INIT_HISTORICAL_DAYS: int = Field(default=365, ge=1, le=3650, description="初始化历史数据天数")
-    TUSHARE_INIT_BATCH_SIZE: int = Field(default=100, ge=10, le=1000, description="初始化批处理大小")
-    TUSHARE_INIT_AUTO_START: bool = Field(default=False, description="应用启动时自动检查并初始化数据")
-
-    # AKShare统一数据同步配置
-    AKSHARE_UNIFIED_ENABLED: bool = Field(default=True, description="启用AKShare统一数据同步")
+    # AKShare 数据同步配置（仅基础信息 + 财务 + 新闻）
+    AKSHARE_UNIFIED_ENABLED: bool = Field(default=True, description="启用AKShare数据同步")
     AKSHARE_BASIC_INFO_SYNC_ENABLED: bool = Field(default=True, description="启用基础信息同步")
-    AKSHARE_BASIC_INFO_SYNC_CRON: str = Field(default="0 3 * * *", description="基础信息同步CRON表达式")  # 每日凌晨3点
-    AKSHARE_QUOTES_SYNC_ENABLED: bool = Field(default=True, description="启用行情同步")
-    AKSHARE_QUOTES_SYNC_CRON: str = Field(default="*/30 9-15 * * 1-5", description="行情同步CRON表达式")  # 交易时间每30分钟（避免频率限制）
-    AKSHARE_HISTORICAL_SYNC_ENABLED: bool = Field(default=True, description="启用历史数据同步")
-    AKSHARE_HISTORICAL_SYNC_CRON: str = Field(default="0 17 * * 1-5", description="历史数据同步CRON表达式")  # 工作日17点
+    AKSHARE_BASIC_INFO_SYNC_CRON: str = Field(default="0 3 * * *", description="基础信息同步CRON")
     AKSHARE_FINANCIAL_SYNC_ENABLED: bool = Field(default=True, description="启用财务数据同步")
-    AKSHARE_FINANCIAL_SYNC_CRON: str = Field(default="0 4 * * 0", description="财务数据同步CRON表达式")  # 周日凌晨4点
+    AKSHARE_FINANCIAL_SYNC_CRON: str = Field(default="0 4 * * 0", description="财务数据同步CRON")
     AKSHARE_STATUS_CHECK_ENABLED: bool = Field(default=True, description="启用状态检查")
-    AKSHARE_STATUS_CHECK_CRON: str = Field(default="30 * * * *", description="状态检查CRON表达式")  # 每小时30分
-
-    # AKShare数据初始化配置
-    AKSHARE_INIT_HISTORICAL_DAYS: int = Field(default=365, ge=1, le=3650, description="初始化历史数据天数")
-    AKSHARE_INIT_BATCH_SIZE: int = Field(default=100, ge=10, le=1000, description="初始化批处理大小")
-    AKSHARE_INIT_AUTO_START: bool = Field(default=False, description="应用启动时自动检查并初始化数据")
+    AKSHARE_STATUS_CHECK_CRON: str = Field(default="30 * * * *", description="状态检查CRON")
 
     # ==================== 分析师数据获取配置 ====================
 
@@ -303,37 +194,6 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-
-def _read_major_version() -> str:
-    v = os.getenv("TRADINGAGENTS_VERSION", "").strip() or os.getenv("APP_VERSION", "").strip()
-    if not v:
-        try:
-            v = Path(__file__).resolve().parents[3].joinpath("VERSION").read_text(encoding="utf-8").strip()
-        except Exception:
-            v = ""
-
-    m = re.match(r"^\s*(\d+)", v)
-    return m.group(1) if m else "0"
-
-
-def _default_instance_tag() -> str:
-    user = os.getenv("TRADINGAGENTS_DB_USER", "").strip() or getpass.getuser()
-    host = os.getenv("TRADINGAGENTS_DB_HOST", "").strip() or os.getenv("COMPUTERNAME", "").strip() or os.getenv("HOSTNAME", "").strip()
-    tag = f"{user}-{host}" if host else user
-    return _sanitize_mongo_db_name(tag).strip("_-").lower() or "local"
-
-
-def _sanitize_mongo_db_name(name: str) -> str:
-    cleaned = re.sub(r"[^a-zA-Z0-9._-]+", "_", str(name)).strip("._-")
-    if not cleaned:
-        return "tradingagentscn"
-
-    max_len = 63
-    if len(cleaned) <= max_len:
-        return cleaned
-
-    suffix = str(abs(hash(cleaned)) % (10**8)).rjust(8, "0")
-    return f"{cleaned[:max_len-9]}_{suffix}"
 
 # 自动将代理配置设置到环境变量
 # 这样 requests 库可以直接读取 os.environ['NO_PROXY']

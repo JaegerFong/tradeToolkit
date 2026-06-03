@@ -61,17 +61,20 @@ def _get_enabled_hk_data_sources() -> list:
     """
     try:
         # 尝试从数据库读取配置
-        from app.core.database import get_mongo_db_sync
-        db = get_mongo_db_sync()
+        from app.core.database import sync_session_factory
+        from app.core.pg_models import SystemConfig
+        from sqlalchemy import select, desc
+        _session = sync_session_factory()
 
         # 获取最新的激活配置
-        config_data = db.system_configs.find_one(
-            {"is_active": True},
-            sort=[("version", -1)]
-        )
+        stmt = select(SystemConfig).where(
+            SystemConfig.is_active == True
+        ).order_by(desc(SystemConfig.version)).limit(1)
+        result = _session.execute(stmt)
+        config_data = result.scalars().first()
 
-        if config_data and config_data.get('data_source_configs'):
-            data_source_configs = config_data.get('data_source_configs', [])
+        if config_data and config_data.data_source_configs:
+            data_source_configs = config_data.data_source_configs or []
 
             # 过滤出启用的港股数据源
             enabled_sources = []
@@ -121,17 +124,20 @@ def _get_enabled_us_data_sources() -> list:
     """
     try:
         # 尝试从数据库读取配置
-        from app.core.database import get_mongo_db_sync
-        db = get_mongo_db_sync()
+        from app.core.database import sync_session_factory
+        from app.core.pg_models import SystemConfig
+        from sqlalchemy import select, desc
+        _session = sync_session_factory()
 
         # 获取最新的激活配置
-        config_data = db.system_configs.find_one(
-            {"is_active": True},
-            sort=[("version", -1)]
-        )
+        stmt = select(SystemConfig).where(
+            SystemConfig.is_active == True
+        ).order_by(desc(SystemConfig.version)).limit(1)
+        result = _session.execute(stmt)
+        config_data = result.scalars().first()
 
-        if config_data and config_data.get('data_source_configs'):
-            data_source_configs = config_data.get('data_source_configs', [])
+        if config_data and config_data.data_source_configs:
+            data_source_configs = config_data.data_source_configs or []
 
             # 过滤出启用的美股数据源
             enabled_sources = []

@@ -25,12 +25,12 @@ class DataSourceCode(str, Enum):
     """
     
     # ==================== 缓存数据源 ====================
-    MONGODB = "mongodb"  # MongoDB 数据库缓存（最高优先级）
+    POSTGRESQL = "postgresql"  # PostgreSQL 数据库缓存（最高优先级，tdx2db K线数据源）
     
     # ==================== 中国市场数据源 ====================
-    TUSHARE = "tushare"      # Tushare - 专业A股数据
     AKSHARE = "akshare"      # AKShare - 开源金融数据（A股+港股）
     BAOSTOCK = "baostock"    # BaoStock - 免费A股数据
+    TDX = "tdx"              # 通达信本地数据 - 读取本地 .day/.lc5 文件
     
     # ==================== 美股数据源 ====================
     YFINANCE = "yfinance"         # yfinance - Yahoo Finance Python库
@@ -74,32 +74,17 @@ class DataSourceInfo:
 
 # ==================== 数据源注册表 ====================
 DATA_SOURCE_REGISTRY: Dict[str, DataSourceInfo] = {
-    # MongoDB 缓存
-    DataSourceCode.MONGODB: DataSourceInfo(
-        code=DataSourceCode.MONGODB,
-        name="MongoDB",
-        display_name="MongoDB 缓存",
-        provider="MongoDB Inc.",
-        description="本地 MongoDB 数据库缓存，最高优先级数据源",
+    # PostgreSQL 缓存 (tdx2db K线 + 业务数据)
+    DataSourceCode.POSTGRESQL: DataSourceInfo(
+        code=DataSourceCode.POSTGRESQL,
+        name="PostgreSQL",
+        display_name="PostgreSQL (tdx2db)",
+        provider="PostgreSQL",
+        description="PostgreSQL 数据库，tdx2db A股K线数据源 + 业务数据",
         supported_markets=["a_shares", "us_stocks", "hk_stocks", "crypto", "futures"],
         requires_api_key=False,
         is_free=True,
-        features=["本地缓存", "最快速度", "离线可用"],
-    ),
-    
-    # Tushare
-    DataSourceCode.TUSHARE: DataSourceInfo(
-        code=DataSourceCode.TUSHARE,
-        name="Tushare",
-        display_name="Tushare",
-        provider="Tushare",
-        description="专业的A股数据接口，提供高质量的历史数据和实时行情",
-        supported_markets=["a_shares"],
-        requires_api_key=True,
-        is_free=False,  # 免费版有限制，专业版需付费
-        official_website="https://tushare.pro",
-        documentation_url="https://tushare.pro/document/2",
-        features=["历史行情", "实时行情", "财务数据", "基本面数据", "新闻公告"],
+        features=["本地缓存", "tdx2db K线", "最快速度", "离线可用"],
     ),
     
     # AKShare
@@ -131,7 +116,20 @@ DATA_SOURCE_REGISTRY: Dict[str, DataSourceInfo] = {
         documentation_url="http://baostock.com/baostock/index.php/Python_API%E6%96%87%E6%A1%A3",
         features=["历史行情", "财务数据", "完全免费", "数据稳定"],
     ),
-    
+
+    # TDX (通达信本地数据)
+    DataSourceCode.TDX: DataSourceInfo(
+        code=DataSourceCode.TDX,
+        name="TDX",
+        display_name="通达信本地数据",
+        provider="通达信",
+        description="通达信本地数据文件，通过 pytdx 读取 vipdoc 目录下的 .day/.lc5 文件，需要通达信客户端预下载盘后数据",
+        supported_markets=["a_shares"],
+        requires_api_key=False,
+        is_free=True,
+        features=["日K线", "5分钟K线", "本地读取", "无网络依赖", "数据完整"],
+    ),
+
     # yfinance
     DataSourceCode.YFINANCE: DataSourceInfo(
         code=DataSourceCode.YFINANCE,

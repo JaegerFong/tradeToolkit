@@ -9,7 +9,6 @@ from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 
 from app.services.news_data_service import get_news_data_service
-from tradingagents.dataflows.providers.china.tushare import get_tushare_provider
 from tradingagents.dataflows.providers.china.akshare import get_akshare_provider
 from tradingagents.dataflows.news.realtime_news import RealtimeNewsAggregator
 
@@ -48,7 +47,6 @@ class NewsDataSyncService:
     def __init__(self):
         self.logger = logging.getLogger(__name__)
         self._news_service = None
-        self._tushare_provider = None
         self._akshare_provider = None
         self._realtime_aggregator = None
     
@@ -58,21 +56,6 @@ class NewsDataSyncService:
             self._news_service = await get_news_data_service()
         return self._news_service
     
-    async def _get_tushare_provider(self):
-        """获取Tushare提供者"""
-        if self._tushare_provider is None:
-            self._tushare_provider = get_tushare_provider()
-            await self._tushare_provider.connect()
-        return self._tushare_provider
-    
-    async def _get_tushare_provider(self):
-        """获取Tushare提供者"""
-        if self._tushare_provider is None:
-            from tradingagents.dataflows.providers.china.tushare import get_tushare_provider
-            self._tushare_provider = get_tushare_provider()
-            await self._tushare_provider.connect()
-        return self._tushare_provider
-
     async def _get_akshare_provider(self):
         """获取AKShare提供者"""
         if self._akshare_provider is None:
@@ -111,25 +94,12 @@ class NewsDataSyncService:
             self.logger.info(f"📰 开始同步股票新闻: {symbol}")
             
             if data_sources is None:
-                data_sources = ["tushare", "akshare", "realtime"]
-            
+                data_sources = ["akshare", "realtime"]
+
             news_service = await self._get_news_service()
             all_news = []
-            
-            # 1. Tushare新闻
-            if "tushare" in data_sources:
-                try:
-                    tushare_news = await self._sync_tushare_news(
-                        symbol, hours_back, max_news_per_source
-                    )
-                    if tushare_news:
-                        all_news.extend(tushare_news)
-                        stats.sources_used.append("tushare")
-                        self.logger.info(f"✅ Tushare新闻获取成功: {len(tushare_news)}条")
-                except Exception as e:
-                    self.logger.error(f"❌ Tushare新闻获取失败: {e}")
-            
-            # 2. AKShare新闻
+
+            # 1. AKShare新闻
             if "akshare" in data_sources:
                 try:
                     akshare_news = await self._sync_akshare_news(
@@ -179,51 +149,6 @@ class NewsDataSyncService:
             self.logger.error(f"❌ 同步股票新闻失败 {symbol}: {e}")
             stats.end_time = datetime.utcnow()
             return stats
-    
-    async def _sync_tushare_news(
-        self,
-        symbol: str,
-        hours_back: int,
-        max_news: int
-    ) -> List[Dict[str, Any]]:
-        """同步Tushare新闻"""
-        try:
-            provider = await self._get_tushare_provider()
-
-            if not provider.is_available():
-                self.logger.warning("⚠️ Tushare提供者不可用")
-                return []
-
-            # 获取新闻数据，传递hours_back参数
-            news_data = await provider.get_stock_news(
-                symbol=symbol,
-                limit=max_news,
-                hours_back=hours_back
-            )
-
-            if news_data:
-                # 标准化新闻数据
-                standardized_news = []
-                for news in news_data:
-                    standardized = self._standardize_tushare_news(news, symbol)
-                    if standardized:
-                        standardized_news.append(standardized)
-
-                self.logger.info(f"✅ Tushare新闻获取成功: {len(standardized_news)}条")
-                return standardized_news
-            else:
-                self.logger.debug("⚠️ Tushare未返回新闻数据")
-                return []
-
-        except Exception as e:
-            # 详细的错误处理
-            if any(keyword in str(e).lower() for keyword in ['权限', 'permission', 'unauthorized']):
-                self.logger.warning(f"⚠️ Tushare新闻接口需要单独开通权限: {e}")
-            elif "积分" in str(e) or "point" in str(e).lower():
-                self.logger.warning(f"⚠️ Tushare积分不足: {e}")
-            else:
-                self.logger.error(f"❌ Tushare新闻同步失败: {e}")
-            return []
     
     async def _sync_akshare_news(
         self, 
@@ -287,28 +212,6 @@ class NewsDataSyncService:
         except Exception as e:
             self.logger.error(f"❌ 实时新闻同步失败: {e}")
             return []
-    
-    def _standardize_tushare_news(self, news: Dict[str, Any], symbol: str) -> Optional[Dict[str, Any]]:
-        """标准化Tushare新闻数据"""
-        try:
-            return {
-                "symbol": symbol,
-                "title": news.get("title", ""),
-                "content": news.get("content", ""),
-                "summary": news.get("summary", ""),
-                "url": news.get("url", ""),
-                "source": news.get("source", "Tushare"),
-                "author": news.get("author", ""),
-                "publish_time": news.get("publish_time"),
-                "category": self._classify_news_category(news.get("title", "")),
-                "sentiment": self._analyze_sentiment(news.get("title", "") + " " + news.get("content", "")),
-                "importance": self._assess_importance(news.get("title", "")),
-                "keywords": self._extract_keywords(news.get("title", "") + " " + news.get("content", "")),
-                "data_source": "tushare"
-            }
-        except Exception as e:
-            self.logger.error(f"❌ 标准化Tushare新闻失败: {e}")
-            return None
     
     def _standardize_akshare_news(self, news: Dict[str, Any], symbol: str) -> Optional[Dict[str, Any]]:
         """标准化AKShare新闻数据"""

@@ -98,27 +98,35 @@ class StockDataService:
         return self._get_fallback_data(stock_code)
     
     def _get_from_mongodb(self, stock_code: str = None) -> Optional[Dict[str, Any]]:
-        """从MongoDB获取数据"""
+        """从 PG 获取数据（向后兼容名称）"""
         try:
-            mongodb_client = self.db_manager.get_mongodb_client()
-            if not mongodb_client:
+            from app.core.pg_models import StockBasicInfo
+            from sqlalchemy import select
+            session = self.db_manager.get_mongodb_client()
+            if not session:
                 return None
 
-            db = mongodb_client[self.db_manager.mongodb_config["database"]]
-            collection = db['stock_basic_info']
-
             if stock_code:
-                # 获取单个股票
-                result = collection.find_one({'code': stock_code})
-                return result if result else None
+                stmt = select(StockBasicInfo).where(StockBasicInfo.code == stock_code)
+                result = session.execute(stmt)
+                row = result.scalars().first()
+                if row:
+                    return {
+                        'code': row.code,
+                        'name': row.name,
+                        'market': row.market,
+                        'industry': row.industry,
+                        'source': row.source,
+                    }
+                return None
             else:
-                # 获取所有股票
-                cursor = collection.find({})
-                results = list(cursor)
-                return results if results else None
+                stmt = select(StockBasicInfo)
+                result = session.execute(stmt)
+                rows = result.scalars().all()
+                return [{'code': r.code, 'name': r.name, 'market': r.market} for r in rows]
 
         except Exception as e:
-            logger.error(f"MongoDB查询失败: {e}")
+            logger.error(f"PG查询失败: {e}")
             return None
     
     def _get_from_enhanced_fetcher(self, stock_code: str = None) -> Optional[Dict[str, Any]]:
@@ -182,36 +190,9 @@ class StockDataService:
             return None
     
     def _cache_to_mongodb(self, data: Any) -> bool:
-        """将数据缓存到MongoDB"""
-        if not self.db_manager or not self.db_manager.mongodb_db:
-            return False
-        
-        try:
-            collection = self.db_manager.mongodb_db['stock_basic_info']
-            
-            if isinstance(data, list):
-                # 批量插入
-                for item in data:
-                    collection.update_one(
-                        {'code': item['code']},
-                        {'$set': item},
-                        upsert=True
-                    )
-                logger.info(f"💾 已缓存{len(data)}条记录到MongoDB")
-            elif isinstance(data, dict):
-                # 单条插入
-                collection.update_one(
-                    {'code': data['code']},
-                    {'$set': data},
-                    upsert=True
-                )
-                logger.info(f"💾 已缓存股票{data['code']}到MongoDB")
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"缓存到MongoDB失败: {e}")
-            return False
+        """将数据缓存到 PG（向后兼容名称，PG 模式下数据已通过同步持久化）"""
+        logger.debug(f"💾 [缓存] PG 模式下跳过缓存，数据已在同步时持久化")
+        return True
     
     def _get_fallback_data(self, stock_code: str = None) -> Dict[str, Any]:
         """最后的降级数据"""

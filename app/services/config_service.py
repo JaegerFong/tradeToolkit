@@ -10,9 +10,7 @@ from collections import defaultdict
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 from app.utils.timezone import now_tz
-from bson import ObjectId
-
-from app.core.database import get_mongo_db
+from app.core.database import async_session_factory
 from app.core.unified_config import unified_config
 from app.models.config import (
     SystemConfig, LLMConfig, DataSourceConfig, DatabaseConfig,
@@ -27,6 +25,293 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# ---- PG 兼容适配层（使 MongoDB 风格代码兼容 SQLAlchemy）----
+
+from sqlalchemy import select, func, update as sa_update, delete, and_, or_
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from app.core.pg_models import (
+    MarketCategory, DataSourceGrouping, LLMProvider as LLMProviderModel,
+    ModelCatalog as ModelCatalogModel, SystemConfig as SystemConfigModel,
+)
+
+COLLECTION_MODEL_MAP = {
+    "market_categories": MarketCategory,
+    "data_source_groupings": DataSourceGrouping,
+    "llm_providers": LLMProviderModel,
+    "model_catalog": ModelCatalogModel,
+    "system_configs": SystemConfigModel,
+}
+
+def _row_to_dict(obj):
+    if obj is None:
+        return None
+    if hasattr(obj, '__dict__'):
+        d = {k: v for k, v in obj.__dict__.items() if not k.startswith('_sa_')}
+        d.pop('_sa_instance_state', None)
+        return d
+    return dict(obj)
+
+
+class _InsertOneResult:
+    def __init__(self, inserted_id): self.inserted_id = inserted_id
+
+class _InsertManyResult:
+    def __init__(self, inserted_ids): self.inserted_ids = inserted_ids
+
+class _UpdateResult:
+    def __init__(self, modified_count=0, upserted_id=None):
+        self.modified_count = modified_count
+        self.upserted_id = upserted_id
+
+class _DeleteResult:
+    def __init__(self, deleted_count=0): self.deleted_count = deleted_count
+
+
+class _AsyncCursor:
+    def __init__(self, stmt, session_factory):
+        self._stmt = stmt
+        self._session_factory = session_factory
+        self._sort_field = None
+        self._sort_dir = 1
+        self._skip = 0
+        self._limit_val = None
+
+    def sort(self, field, direction=1):
+        self._sort_field = field
+        self._sort_dir = direction
+        return self
+
+    def skip(self, n):
+        self._skip = n
+        return self
+
+    def limit(self, n):
+        self._limit_val = n
+        return self
+
+    async def to_list(self, length=None):
+        limit = length if length is not None else self._limit_val
+        async with self._session_factory() as session:
+            stmt = self._stmt
+            if self._sort_field:
+                col = self._sort_field if isinstance(self._sort_field, str) else self._sort_field
+                stmt = stmt.order_by(col.desc() if self._sort_dir < 0 else col.asc())
+            if self._skip:
+                stmt = stmt.offset(self._skip)
+            if limit is not None:
+                stmt = stmt.limit(limit)
+            result = await session.execute(stmt)
+            rows = result.scalars().all()
+            return [_row_to_dict(r) for r in rows]
+
+
+class _PGCollection:
+    def __init__(self, session_factory, model_class):
+        self._sf = session_factory
+        self._model = model_class
+
+    async def find(self, query=None, projection=None):
+        stmt = select(self._model)
+        if query:
+            stmt = self._apply_query(stmt, query)
+        return _AsyncCursor(stmt, self._sf)
+
+    async def find_one(self, query=None, projection=None, sort=None):
+        async with self._sf() as session:
+            stmt = select(self._model)
+            if query:
+                stmt = self._apply_query(stmt, query)
+            if sort:
+                for field_dir in sort:
+                    if isinstance(field_dir, (list, tuple)):
+                        field, direction = field_dir
+                        col = getattr(self._model, field)
+                        stmt = stmt.order_by(col.desc() if direction < 0 else col.asc())
+                    else:
+                        stmt = stmt.order_by(getattr(self._model, field_dir))
+            stmt = stmt.limit(1)
+            result = await session.execute(stmt)
+            row = result.scalar_one_or_none()
+            return _row_to_dict(row)
+
+    def _apply_query(self, stmt, query):
+        for key, value in query.items():
+            if key == "$or":
+                conditions = []
+                for q in value:
+                    cond = and_(True)
+                    for k, v in q.items():
+                        cond = self._build_condition(cond, k, v)
+                    conditions.append(cond)
+                stmt = stmt.where(or_(*conditions))
+            elif key == "$and":
+                for q in value:
+                    for k, v in q.items():
+                        stmt = self._build_condition(stmt, k, v)
+            else:
+                stmt = self._build_condition(stmt, key, value)
+        return stmt
+
+    def _build_condition(self, stmt, key, value):
+        column = getattr(self._model, key, None)
+        if column is None:
+            return stmt.where(and_(False))
+        if isinstance(value, dict):
+            cond = and_(True)
+            for op, val in value.items():
+                if op == "$regex":
+                    cond = cond & column.ilike(f"%{val}%")
+                elif op == "$options":
+                    pass  # Handled by ilike above
+                elif op == "$ne":
+                    cond = cond & (column != val)
+                elif op == "$in":
+                    cond = cond & column.in_(val)
+                elif op == "$gte":
+                    cond = cond & (column >= val)
+                elif op == "$lte":
+                    cond = cond & (column <= val)
+                elif op == "$gt":
+                    cond = cond & (column > val)
+                elif op == "$lt":
+                    cond = cond & (column < val)
+            return stmt.where(cond)
+        elif isinstance(value, list):
+            return stmt.where(column.in_(value))
+        else:
+            return stmt.where(column == value)
+
+    async def insert_one(self, document):
+        async with self._sf() as session:
+            doc = {k: v for k, v in document.items() if k != '_id'}
+            instance = self._model(**doc)
+            session.add(instance)
+            await session.commit()
+            await session.refresh(instance)
+            return _InsertOneResult(instance.id)
+
+    async def insert_many(self, documents):
+        async with self._sf() as session:
+            ids = []
+            for doc in documents:
+                d = {k: v for k, v in doc.items() if k != '_id'}
+                instance = self._model(**d)
+                session.add(instance)
+                await session.flush()
+                ids.append(instance.id)
+            await session.commit()
+            return _InsertManyResult(ids)
+
+    async def update_one(self, filter_dict, update_dict, upsert=False):
+        async with self._sf() as session:
+            set_values = update_dict.get("$set", update_dict)
+            set_values.pop("_id", None)
+
+            if upsert and len(filter_dict) == 1:
+                key = list(filter_dict.keys())[0]
+                val = filter_dict[key]
+                stmt = pg_insert(self._model).values(**{key: val}, **set_values)
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=[key],
+                    set_=set_values,
+                )
+                result = await session.execute(stmt)
+                await session.commit()
+                up_id = result.inserted_primary_key[0] if result.inserted_primary_key else None
+                return _UpdateResult(modified_count=result.rowcount, upserted_id=up_id)
+
+            stmt = sa_update(self._model).values(**set_values)
+            for k, v in filter_dict.items():
+                if isinstance(v, dict):
+                    for op, val in v.items():
+                        col = getattr(self._model, k)
+                        if op == "$ne":
+                            stmt = stmt.where(col != val)
+                        elif op == "$in":
+                            stmt = stmt.where(col.in_(val))
+                        elif op == "$gte":
+                            stmt = stmt.where(col >= val)
+                        elif op == "$lte":
+                            stmt = stmt.where(col <= val)
+                        else:
+                            stmt = stmt.where(col == val)
+                else:
+                    stmt = stmt.where(getattr(self._model, k) == v)
+            result = await session.execute(stmt)
+            await session.commit()
+            return _UpdateResult(modified_count=result.rowcount)
+
+    async def update_many(self, filter_dict, update_dict, upsert=False):
+        return await self.update_one(filter_dict, update_dict, upsert=upsert)
+
+    async def delete_one(self, filter_dict):
+        async with self._sf() as session:
+            stmt = delete(self._model)
+            for k, v in filter_dict.items():
+                stmt = stmt.where(getattr(self._model, k) == v)
+            result = await session.execute(stmt)
+            await session.commit()
+            return _DeleteResult(deleted_count=result.rowcount)
+
+    async def delete_many(self, filter_dict):
+        return await self.delete_one(filter_dict)
+
+    async def count_documents(self, query=None):
+        async with self._sf() as session:
+            stmt = select(func.count()).select_from(self._model)
+            if query:
+                if "$or" in query:
+                    conditions = []
+                    for q in query["$or"]:
+                        cond = and_(True)
+                        for k, v in q.items():
+                            cond = cond & (getattr(self._model, k) == v)
+                        conditions.append(cond)
+                    stmt = stmt.where(or_(*conditions))
+                else:
+                    for k, v in query.items():
+                        if isinstance(v, dict):
+                            col = getattr(self._model, k)
+                            for op, val in v.items():
+                                if op == "$ne":
+                                    stmt = stmt.where(col != val)
+                                elif op == "$in":
+                                    stmt = stmt.where(col.in_(val))
+                                elif op == "$gte":
+                                    stmt = stmt.where(col >= val)
+                                elif op == "$lte":
+                                    stmt = stmt.where(col <= val)
+                        else:
+                            stmt = stmt.where(getattr(self._model, k) == v)
+            result = await session.execute(stmt)
+            return result.scalar() or 0
+
+    async def aggregate(self, pipeline):
+        return _AsyncCursor(select(self._model), self._sf)
+
+    async def create_index(self, *args, **kwargs):
+        pass  # Handled by ORM model definitions
+
+    async def drop_index(self, *args, **kwargs):
+        pass
+
+    async def distinct(self, field):
+        async with self._sf() as session:
+            col = getattr(self._model, field)
+            result = await session.execute(select(func.distinct(col)))
+            return [r[0] for r in result.all()]
+
+
+class _PGDatabase:
+    def __init__(self, session_factory):
+        self._sf = session_factory
+
+    def __getattr__(self, name):
+        model = COLLECTION_MODEL_MAP.get(name)
+        if model is not None:
+            return _PGCollection(self._sf, model)
+        raise AttributeError(f"No PG model for collection: {name}")
+
 
 class ConfigService:
     """配置管理服务类"""
@@ -36,15 +321,8 @@ class ConfigService:
         self.db_manager = db_manager
 
     async def _get_db(self):
-        """获取数据库连接"""
-        if self.db is None:
-            if self.db_manager and self.db_manager.mongo_db is not None:
-                # 如果有DatabaseManager实例，直接使用
-                self.db = self.db_manager.mongo_db
-            else:
-                # 否则使用全局函数
-                self.db = get_mongo_db()
-        return self.db
+        """获取数据库连接（返回 PG 兼容适配器）"""
+        return _PGDatabase(async_session_factory)
 
     @staticmethod
     def _provider_to_string(provider: Any) -> str:
@@ -474,17 +752,6 @@ class ConfigService:
                     priority=1,
                     description="AKShare开源金融数据接口"
                 ),
-                DataSourceConfig(
-                    name="Tushare",
-                    type=DataSourceType.TUSHARE,
-                    api_key="your-tushare-token",
-                    endpoint="http://api.tushare.pro",
-                    timeout=30,
-                    rate_limit=200,
-                    enabled=False,
-                    priority=2,
-                    description="Tushare专业金融数据接口"
-                )
             ],
             default_data_source="AKShare",
             database_configs=[
@@ -1196,157 +1463,7 @@ class ConfigService:
             logger.info(f"🔍 [TEST] Received API Key from config: {repr(api_key)} (type: {type(api_key).__name__}, length: {len(api_key) if api_key else 0})")
 
             # 根据不同的数据源类型进行测试
-            if ds_type == "tushare":
-                # 🔥 如果配置中的 API Key 包含 "..."（截断标记），需要验证是否是未修改的原值
-                if api_key and "..." in api_key:
-                    logger.info(f"🔍 [TEST] API Key contains '...' (truncated), checking if it matches database value")
-
-                    # 从数据库中获取完整的 API Key
-                    system_config = await self.get_system_config()
-                    db_config = None
-                    if system_config:
-                        for ds in system_config.data_source_configs:
-                            if ds.name == ds_config.name:
-                                db_config = ds
-                                break
-
-                    if db_config and db_config.api_key:
-                        # 对数据库中的完整 API Key 进行相同的截断处理
-                        truncated_db_key = self._truncate_api_key(db_config.api_key)
-                        logger.info(f"🔍 [TEST] Database API Key truncated: {truncated_db_key}")
-                        logger.info(f"🔍 [TEST] Received API Key: {api_key}")
-
-                        # 比较截断后的值
-                        if api_key == truncated_db_key:
-                            # 相同，说明用户没有修改，使用数据库中的完整值
-                            api_key = db_config.api_key
-                            used_db_credentials = True
-                            logger.info(f"✅ [TEST] Truncated values match, using complete API Key from database (length: {len(api_key)})")
-                        else:
-                            # 不同，说明用户修改了但修改得不完整
-                            logger.error(f"❌ [TEST] Truncated API Key doesn't match database value, user may have modified it incorrectly")
-                            return {
-                                "success": False,
-                                "message": "API Key 格式错误：检测到截断标记但与数据库中的值不匹配，请输入完整的 API Key",
-                                "response_time": time.time() - start_time,
-                                "details": {
-                                    "error": "truncated_key_mismatch",
-                                    "received": api_key,
-                                    "expected": truncated_db_key
-                                }
-                            }
-                    else:
-                        # 数据库中没有有效的 API Key，尝试从环境变量获取
-                        logger.info(f"⚠️  [TEST] No valid API Key in database, trying environment variable")
-                        env_token = os.getenv('TUSHARE_TOKEN')
-                        if env_token:
-                            api_key = env_token.strip().strip('"').strip("'")
-                            used_env_credentials = True
-                            logger.info(f"🔑 [TEST] Using TUSHARE_TOKEN from environment (length: {len(api_key)})")
-                        else:
-                            logger.error(f"❌ [TEST] No valid API Key in database or environment")
-                            return {
-                                "success": False,
-                                "message": "API Key 无效：数据库和环境变量中均未配置有效的 Token",
-                                "response_time": time.time() - start_time,
-                                "details": None
-                            }
-
-                # 如果 API Key 为空，尝试从数据库或环境变量获取
-                elif not api_key:
-                    logger.info(f"⚠️  [TEST] API Key is empty, trying to get from database")
-
-                    # 从数据库中获取完整的 API Key
-                    system_config = await self.get_system_config()
-                    db_config = None
-                    if system_config:
-                        for ds in system_config.data_source_configs:
-                            if ds.name == ds_config.name:
-                                db_config = ds
-                                break
-
-                    if db_config and db_config.api_key and "..." not in db_config.api_key:
-                        api_key = db_config.api_key
-                        used_db_credentials = True
-                        logger.info(f"🔑 [TEST] Using API Key from database (length: {len(api_key)})")
-                    else:
-                        # 如果数据库中也没有，尝试从环境变量获取
-                        logger.info(f"⚠️  [TEST] No valid API Key in database, trying environment variable")
-                        env_token = os.getenv('TUSHARE_TOKEN')
-                        if env_token:
-                            api_key = env_token.strip().strip('"').strip("'")
-                            used_env_credentials = True
-                            logger.info(f"🔑 [TEST] Using TUSHARE_TOKEN from environment (length: {len(api_key)})")
-                        else:
-                            logger.error(f"❌ [TEST] No valid API Key in config, database, or environment")
-                            return {
-                                "success": False,
-                                "message": "API Key 无效：配置、数据库和环境变量中均未配置有效的 Token",
-                                "response_time": time.time() - start_time,
-                                "details": None
-                            }
-                else:
-                    # API Key 是完整的，直接使用
-                    logger.info(f"✅ [TEST] Using complete API Key from config (length: {len(api_key)})")
-
-                # 测试 Tushare API
-                try:
-                    logger.info(f"🔌 [TEST] Calling Tushare API with token (length: {len(api_key)})")
-                    import tushare as ts
-                    ts.set_token(api_key)
-                    pro = ts.pro_api()
-                    # 获取交易日历（轻量级测试）
-                    df = pro.trade_cal(exchange='SSE', start_date='20240101', end_date='20240101')
-
-                    if df is not None and len(df) > 0:
-                        response_time = time.time() - start_time
-                        logger.info(f"✅ [TEST] Tushare API call successful (response time: {response_time:.2f}s)")
-
-                        # 构建消息，说明使用了哪个来源的凭证
-                        credential_source = "配置"
-                        if used_db_credentials:
-                            credential_source = "数据库"
-                        elif used_env_credentials:
-                            credential_source = "环境变量"
-
-                        return {
-                            "success": True,
-                            "message": f"成功连接到 Tushare 数据源（使用{credential_source}中的凭证）",
-                            "response_time": response_time,
-                            "details": {
-                                "type": ds_type,
-                                "test_result": "获取交易日历成功",
-                                "credential_source": credential_source,
-                                "used_db_credentials": used_db_credentials,
-                                "used_env_credentials": used_env_credentials
-                            }
-                        }
-                    else:
-                        logger.error(f"❌ [TEST] Tushare API returned empty data")
-                        return {
-                            "success": False,
-                            "message": "Tushare API 返回数据为空",
-                            "response_time": time.time() - start_time,
-                            "details": None
-                        }
-                except ImportError:
-                    logger.error(f"❌ [TEST] Tushare library not installed")
-                    return {
-                        "success": False,
-                        "message": "Tushare 库未安装，请运行: pip install tushare",
-                        "response_time": time.time() - start_time,
-                        "details": None
-                    }
-                except Exception as e:
-                    logger.error(f"❌ [TEST] Tushare API call failed: {e}")
-                    return {
-                        "success": False,
-                        "message": f"Tushare API 调用失败: {str(e)}",
-                        "response_time": time.time() - start_time,
-                        "details": None
-                    }
-
-            elif ds_type == "akshare":
+            if ds_type == "akshare":
                 # AKShare 不需要 API Key，直接测试
                 try:
                     import akshare as ak
@@ -1645,156 +1762,13 @@ class ConfigService:
 
             # 根据不同的数据库类型进行测试
             if db_type == "mongodb":
-                try:
-                    from motor.motor_asyncio import AsyncIOMotorClient
-                    import os
-
-                    # 🔥 优先使用环境变量中的完整连接信息（包括host、用户名、密码）
-                    host = db_config.host
-                    port = db_config.port
-                    username = db_config.username
-                    password = db_config.password
-                    database = db_config.database
-                    auth_source = None
-                    used_env_config = False
-
-                    # 检测是否在 Docker 环境中
-                    is_docker = os.path.exists('/.dockerenv') or os.getenv('DOCKER_CONTAINER') == 'true'
-
-                    # 如果配置中没有用户名密码，尝试从环境变量获取完整配置
-                    if not username or not password:
-                        env_host = os.getenv('MONGODB_HOST')
-                        env_port = os.getenv('MONGODB_PORT')
-                        env_username = os.getenv('MONGODB_USERNAME')
-                        env_password = os.getenv('MONGODB_PASSWORD')
-                        env_auth_source = os.getenv('MONGODB_AUTH_SOURCE', 'admin')
-
-                        if env_username and env_password:
-                            username = env_username
-                            password = env_password
-                            auth_source = env_auth_source
-                            used_env_config = True
-
-                            # 如果环境变量中有 host 配置，也使用它
-                            if env_host:
-                                host = env_host
-                                # 🔥 Docker 环境下，将 localhost 替换为 mongodb
-                                if is_docker and host == 'localhost':
-                                    host = 'mongodb'
-                                    logger.info(f"🐳 检测到 Docker 环境，将 host 从 localhost 改为 mongodb")
-
-                            if env_port:
-                                port = int(env_port)
-
-                            logger.info(f"🔑 使用环境变量中的 MongoDB 配置 (host={host}, port={port}, authSource={auth_source})")
-
-                    # 如果配置中没有数据库名，尝试从环境变量获取
-                    if not database:
-                        env_database = os.getenv('MONGODB_DATABASE')
-                        if env_database:
-                            database = env_database
-                            logger.info(f"📦 使用环境变量中的数据库名: {database}")
-
-                    # 从连接参数中获取 authSource（如果有）
-                    if not auth_source and db_config.connection_params:
-                        auth_source = db_config.connection_params.get('authSource')
-
-                    # 构建连接字符串
-                    if username and password:
-                        connection_string = f"mongodb://{username}:{password}@{host}:{port}"
-                    else:
-                        connection_string = f"mongodb://{host}:{port}"
-
-                    if database:
-                        connection_string += f"/{database}"
-
-                    # 添加连接参数
-                    params_list = []
-
-                    # 如果有 authSource，添加到参数中
-                    if auth_source:
-                        params_list.append(f"authSource={auth_source}")
-
-                    # 添加其他连接参数
-                    if db_config.connection_params:
-                        for k, v in db_config.connection_params.items():
-                            if k != 'authSource':  # authSource 已经添加过了
-                                params_list.append(f"{k}={v}")
-
-                    if params_list:
-                        connection_string += f"?{'&'.join(params_list)}"
-
-                    logger.info(f"🔗 连接字符串: {connection_string.replace(password or '', '***') if password else connection_string}")
-
-                    # 创建客户端并测试连接
-                    client = AsyncIOMotorClient(
-                        connection_string,
-                        serverSelectionTimeoutMS=5000  # 5秒超时
-                    )
-
-                    # 如果指定了数据库，测试该数据库的访问权限
-                    if database:
-                        # 测试指定数据库的访问（不需要管理员权限）
-                        db = client[database]
-                        # 尝试列出集合（如果没有权限会报错）
-                        collections = await db.list_collection_names()
-                        test_result = f"数据库 '{database}' 可访问，包含 {len(collections)} 个集合"
-                    else:
-                        # 如果没有指定数据库，只执行 ping 命令
-                        await client.admin.command('ping')
-                        test_result = "连接成功"
-
-                    response_time = time.time() - start_time
-
-                    # 关闭连接
-                    client.close()
-
-                    return {
-                        "success": True,
-                        "message": f"成功连接到 MongoDB 数据库",
-                        "response_time": response_time,
-                        "details": {
-                            "type": db_type,
-                            "host": host,
-                            "port": port,
-                            "database": database,
-                            "auth_source": auth_source,
-                            "test_result": test_result,
-                            "used_env_config": used_env_config
-                        }
-                    }
-                except ImportError:
-                    return {
-                        "success": False,
-                        "message": "Motor 库未安装，请运行: pip install motor",
-                        "response_time": time.time() - start_time,
-                        "details": None
-                    }
-                except Exception as e:
-                    error_msg = str(e)
-                    logger.error(f"❌ MongoDB 连接测试失败: {error_msg}")
-
-                    if "Authentication failed" in error_msg or "auth failed" in error_msg.lower():
-                        message = "认证失败，请检查用户名和密码"
-                    elif "requires authentication" in error_msg.lower():
-                        message = "需要认证，请配置用户名和密码"
-                    elif "not authorized" in error_msg.lower():
-                        message = "权限不足，请检查用户权限配置"
-                    elif "Connection refused" in error_msg:
-                        message = "连接被拒绝，请检查主机地址和端口"
-                    elif "timed out" in error_msg.lower():
-                        message = "连接超时，请检查网络和防火墙设置"
-                    elif "No servers found" in error_msg:
-                        message = "找不到服务器，请检查主机地址和端口"
-                    else:
-                        message = f"连接失败: {error_msg}"
-
-                    return {
-                        "success": False,
-                        "message": message,
-                        "response_time": time.time() - start_time,
-                        "details": None
-                    }
+                response_time = time.time() - start_time
+                return {
+                    "success": False,
+                    "message": "MongoDB 已迁移至 PostgreSQL，不再支持 MongoDB 连接测试",
+                    "response_time": response_time,
+                    "details": {"type": db_type, "note": "系统已迁移至 PostgreSQL"}
+                }
 
             elif db_type == "redis":
                 try:
@@ -2848,10 +2822,12 @@ class ConfigService:
             provider.created_at = now_tz()
             provider.updated_at = now_tz()
 
-            # 修复：删除 _id 字段，让 MongoDB 自动生成 ObjectId
+            # PG 使用自增 id，不需要手动处理 _id
             provider_data = provider.model_dump(by_alias=True, exclude_unset=True)
             if "_id" in provider_data:
                 del provider_data["_id"]
+            if "id" in provider_data:
+                del provider_data["id"]
 
             result = await providers_collection.insert_one(provider_data)
             return str(result.inserted_id)
@@ -2867,31 +2843,17 @@ class ConfigService:
 
             update_data["updated_at"] = now_tz()
 
-            # 兼容处理：尝试 ObjectId 和字符串两种类型
-            # 原因：历史数据可能混用了 ObjectId 和字符串作为 _id
+            # PG 使用整数 id，直接通过 id 更新
             try:
-                # 先尝试作为 ObjectId 查询
-                result = await providers_collection.update_one(
-                    {"_id": ObjectId(provider_id)},
-                    {"$set": update_data}
-                )
+                pid = int(provider_id)
+            except (ValueError, TypeError):
+                pid = 0
 
-                # 如果没有匹配到，再尝试作为字符串查询
-                if result.matched_count == 0:
-                    result = await providers_collection.update_one(
-                        {"_id": provider_id},
-                        {"$set": update_data}
-                    )
-            except Exception:
-                # 如果 ObjectId 转换失败，直接用字符串查询
-                result = await providers_collection.update_one(
-                    {"_id": provider_id},
-                    {"$set": update_data}
-                )
+            result = await providers_collection.update_one(
+                {"id": pid},
+                {"$set": update_data}
+            )
 
-            # 修复：matched_count > 0 表示找到了记录（即使没有修改）
-            # modified_count > 0 只有在实际修改了字段时才为真
-            # 如果记录存在但值相同，modified_count 为 0，但这不应该返回 404
             return result.matched_count > 0
         except Exception as e:
             print(f"更新厂家失败: {e}")
@@ -2902,51 +2864,28 @@ class ConfigService:
     async def delete_llm_provider(self, provider_id: str) -> bool:
         """删除大模型厂家"""
         try:
-            print(f"🗑️ 删除厂家 - provider_id: {provider_id}")
-            print(f"🔍 ObjectId类型: {type(ObjectId(provider_id))}")
+            try:
+                pid = int(provider_id)
+            except (ValueError, TypeError):
+                pid = 0
 
             db = await self._get_db()
             providers_collection = db.llm_providers
-            print(f"📊 数据库: {db.name}, 集合: {providers_collection.name}")
 
-            # 先列出所有厂家的ID，看看格式
-            all_providers = await providers_collection.find({}, {"_id": 1, "display_name": 1}).to_list(length=None)
-            print(f"📋 数据库中所有厂家ID:")
-            for p in all_providers:
-                print(f"   - {p['_id']} ({type(p['_id'])}) - {p.get('display_name')}")
-                if str(p['_id']) == provider_id:
-                    print(f"   ✅ 找到匹配的ID!")
-
-            # 尝试不同的查找方式
-            print(f"🔍 尝试用ObjectId查找...")
-            existing1 = await providers_collection.find_one({"_id": ObjectId(provider_id)})
-
-            print(f"🔍 尝试用字符串查找...")
-            existing2 = await providers_collection.find_one({"_id": provider_id})
-
-            print(f"🔍 ObjectId查找结果: {existing1 is not None}")
-            print(f"🔍 字符串查找结果: {existing2 is not None}")
-
-            existing = existing1 or existing2
+            # PG 使用整数 id
+            existing = await providers_collection.find_one({"id": pid})
             if not existing:
-                print(f"❌ 两种方式都找不到厂家: {provider_id}")
+                print(f"找不到厂家: {provider_id}")
                 return False
 
-            print(f"✅ 找到厂家: {existing.get('display_name')}")
-
-            # 使用找到的方式进行删除
-            if existing1:
-                result = await providers_collection.delete_one({"_id": ObjectId(provider_id)})
-            else:
-                result = await providers_collection.delete_one({"_id": provider_id})
-
+            result = await providers_collection.delete_one({"id": pid})
             success = result.deleted_count > 0
 
-            print(f"🗑️ 删除结果: {success}, deleted_count: {result.deleted_count}")
+            print(f"删除结果: {success}, deleted_count: {result.deleted_count}")
             return success
 
         except Exception as e:
-            print(f"❌ 删除厂家失败: {e}")
+            print(f"删除厂家失败: {e}")
             import traceback
             traceback.print_exc()
             return False
@@ -2957,26 +2896,16 @@ class ConfigService:
             db = await self._get_db()
             providers_collection = db.llm_providers
 
-            # 兼容处理：尝试 ObjectId 和字符串两种类型
+            # PG 使用整数 id
             try:
-                # 先尝试作为 ObjectId 查询
-                result = await providers_collection.update_one(
-                    {"_id": ObjectId(provider_id)},
-                    {"$set": {"is_active": is_active, "updated_at": now_tz()}}
-                )
+                pid = int(provider_id)
+            except (ValueError, TypeError):
+                pid = 0
 
-                # 如果没有匹配到，再尝试作为字符串查询
-                if result.matched_count == 0:
-                    result = await providers_collection.update_one(
-                        {"_id": provider_id},
-                        {"$set": {"is_active": is_active, "updated_at": now_tz()}}
-                    )
-            except Exception:
-                # 如果 ObjectId 转换失败，直接用字符串查询
-                result = await providers_collection.update_one(
-                    {"_id": provider_id},
-                    {"$set": {"is_active": is_active, "updated_at": now_tz()}}
-                )
+            result = await providers_collection.update_one(
+                {"id": pid},
+                {"$set": {"is_active": is_active, "updated_at": now_tz()}}
+            )
 
             return result.matched_count > 0
         except Exception as e:
@@ -3050,10 +2979,12 @@ class ConfigService:
                 }
 
                 provider = LLMProvider(**provider_data)
-                # 修复：删除 _id 字段，让 MongoDB 自动生成 ObjectId
+                # PG 使用自增 id
                 insert_data = provider.model_dump(by_alias=True, exclude_unset=True)
                 if "_id" in insert_data:
                     del insert_data["_id"]
+                if "id" in insert_data:
+                    del insert_data["id"]
                 await providers_collection.insert_one(insert_data)
                 added_count += 1
 
@@ -3220,18 +3151,12 @@ class ConfigService:
             db = await self._get_db()
             providers_collection = db.llm_providers
 
-            # 兼容处理：尝试 ObjectId 和字符串两种类型
-            from bson import ObjectId
-            provider_data = None
+            # PG 使用整数 id
             try:
-                # 先尝试作为 ObjectId 查询
-                provider_data = await providers_collection.find_one({"_id": ObjectId(provider_id)})
-            except Exception:
-                pass
-
-            # 如果没有找到，再尝试作为字符串查询
-            if not provider_data:
-                provider_data = await providers_collection.find_one({"_id": provider_id})
+                pid = int(provider_id)
+            except (ValueError, TypeError):
+                pid = 0
+            provider_data = await providers_collection.find_one({"id": pid})
 
             if not provider_data:
                 return {
@@ -3875,16 +3800,12 @@ class ConfigService:
             db = await self._get_db()
             providers_collection = db.llm_providers
 
-            # 兼容处理：尝试 ObjectId 和字符串两种类型
-            from bson import ObjectId
-            provider_data = None
+            # PG 使用整数 id
             try:
-                provider_data = await providers_collection.find_one({"_id": ObjectId(provider_id)})
-            except Exception:
-                pass
-
-            if not provider_data:
-                provider_data = await providers_collection.find_one({"_id": provider_id})
+                pid = int(provider_id)
+            except (ValueError, TypeError):
+                pid = 0
+            provider_data = await providers_collection.find_one({"id": pid})
 
             if not provider_data:
                 return {

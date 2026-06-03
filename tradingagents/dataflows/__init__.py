@@ -15,8 +15,6 @@ try:
     from .interface import (
         get_stock_stats_indicators_window,
         get_stockstats_indicator,
-        get_china_stock_data_tushare,
-        get_china_stock_fundamentals_tushare,
         get_china_stock_data_unified,
         get_china_stock_info_unified,
         switch_china_data_source,
@@ -28,8 +26,6 @@ except ImportError as e:
 __all__ = [
     "get_stock_stats_indicators_window",
     "get_stockstats_indicator",
-    "get_china_stock_data_tushare",
-    "get_china_stock_fundamentals_tushare",
     "get_china_stock_data_unified",
     "get_china_stock_info_unified",
     "switch_china_data_source",

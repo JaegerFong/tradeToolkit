@@ -15,10 +15,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from enum import Enum
 
-from motor.motor_asyncio import AsyncIOMotorDatabase
-from pymongo import UpdateOne
-
-from app.core.database import get_mongo_db
+from app.core.pg_adapter import get_pg_db as get_mongo_db
 from app.services.basics_sync import add_financial_metrics as _add_financial_metrics_util
 
 
@@ -76,7 +73,7 @@ class MultiSourceBasicsSyncService:
             return doc
         return {"job": JOB_KEY, "status": "never_run"}
 
-    async def _persist_status(self, db: AsyncIOMotorDatabase, stats: Dict[str, Any]) -> None:
+    async def _persist_status(self, db, stats: Dict[str, Any]) -> None:
         """持久化同步状态"""
         stats["job"] = JOB_KEY
 
@@ -97,47 +94,24 @@ class MultiSourceBasicsSyncService:
 
     async def _execute_bulk_write_with_retry(
         self,
-        db: AsyncIOMotorDatabase,
+        db,
         operations: List,
         max_retries: int = 3
     ) -> Tuple[int, int]:
-        """
-        执行批量写入，带重试机制
-
-        Args:
-            db: MongoDB数据库实例
-            operations: 批量操作列表
-            max_retries: 最大重试次数
-
-        Returns:
-            (新增数量, 更新数量)
-        """
+        """执行批量写入 (PG 版本)"""
         inserted = 0
         updated = 0
-        retry_count = 0
-
-        while retry_count < max_retries:
+        for op in operations:
             try:
-                result = await db[COLLECTION_NAME].bulk_write(operations, ordered=False)
-                inserted = result.upserted_count
-                updated = result.modified_count
-                logger.debug(f"✅ 批量写入成功: 新增 {inserted}, 更新 {updated}")
-                return inserted, updated
-
-            except asyncio.TimeoutError as e:
-                retry_count += 1
-                if retry_count < max_retries:
-                    wait_time = 2 ** retry_count  # 指数退避：2秒、4秒、8秒
-                    logger.warning(f"⚠️ 批量写入超时 (第{retry_count}次重试)，等待{wait_time}秒后重试...")
-                    await asyncio.sleep(wait_time)
-                else:
-                    logger.error(f"❌ 批量写入失败，已重试{max_retries}次: {e}")
-                    return 0, 0
-
+                result = await db[COLLECTION_NAME].update_one(
+                    op["filter"], op["update"], upsert=op.get("upsert", False))
+                if result.upserted_id:
+                    inserted += 1
+                elif result.modified_count > 0:
+                    updated += 1
             except Exception as e:
-                logger.error(f"❌ 批量写入失败: {e}")
-                return 0, 0
-
+                logger.warning(f"写入单条记录失败: {e}")
+        logger.debug(f"✅ 批量写入完成: 新增 {inserted}, 更新 {updated}")
         return inserted, updated
 
     async def run_full_sync(self, force: bool = False, preferred_sources: List[str] = None) -> Dict[str, Any]:
@@ -281,7 +255,7 @@ class MultiSourceBasicsSyncService:
                     self._add_financial_metrics(doc, daily_metrics)
 
                     # 🔥 使用 (code, source) 联合查询条件
-                    ops.append(UpdateOne({"code": code, "source": data_source}, {"$set": doc}, upsert=True))
+                    ops.append({"filter": {"code": code, "source": data_source}, "update": {"$set": doc}, "upsert": True})
 
                 except Exception as e:
                     logger.error(f"Error processing stock {row.get('ts_code', 'unknown')}: {e}")

@@ -155,7 +155,7 @@ class DataSourceType(str, Enum):
     添加新数据源时，请先在 tradingagents/constants/data_sources.py 中注册
     """
     # 缓存数据源
-    MONGODB = "mongodb"
+    POSTGRESQL = "postgresql"
 
     # 中国市场数据源
     TUSHARE = "tushare"

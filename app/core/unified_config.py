@@ -256,151 +256,92 @@ class UnifiedConfigManager:
     
     # ==================== 数据源配置管理 ====================
     
+    def _get_data_source_configs_from_db(self) -> Optional[List[DataSourceConfig]]:
+        """从 PG 数据库读取数据源配置"""
+        try:
+            from app.core.database import sync_session_factory
+            from app.core.pg_models import SystemConfig as SystemConfigModel
+            from sqlalchemy import select, desc
+
+            session = sync_session_factory()
+            try:
+                result = session.execute(
+                    select(SystemConfigModel)
+                    .where(SystemConfigModel.is_active == True)
+                    .order_by(desc(SystemConfigModel.version))
+                    .limit(1)
+                )
+                config_row = result.scalar_one_or_none()
+
+                if config_row and config_row.data_source_configs:
+                    raw_configs = config_row.data_source_configs
+                    result_configs = []
+                    for ds_config in raw_configs:
+                        try:
+                            result_configs.append(DataSourceConfig(**ds_config))
+                        except Exception as e:
+                            print(f"⚠️ [unified_config] 解析数据源配置失败: {e}")
+                            continue
+                    result_configs.sort(key=lambda x: x.priority, reverse=True)
+                    print(f"✅ [unified_config] 从 PG 数据库读取到 {len(result_configs)} 个数据源配置")
+                    return result_configs
+            finally:
+                session.close()
+        except Exception as e:
+            print(f"⚠️ [unified_config] 从 PG 数据库读取数据源配置失败: {e}")
+        return None
+
     def get_data_source_configs(self) -> List[DataSourceConfig]:
         """获取数据源配置 - 优先从数据库读取，回退到硬编码（同步版本）"""
-        try:
-            # 🔥 优先从数据库读取配置（使用同步连接）
-            from app.core.database import get_mongo_db_sync
-            db = get_mongo_db_sync()
-            config_collection = db.system_configs
-
-            # 获取最新的激活配置
-            config_data = config_collection.find_one(
-                {"is_active": True},
-                sort=[("version", -1)]
-            )
-
-            if config_data and config_data.get('data_source_configs'):
-                # 从数据库读取到配置
-                data_source_configs = config_data.get('data_source_configs', [])
-                print(f"✅ [unified_config] 从数据库读取到 {len(data_source_configs)} 个数据源配置")
-
-                # 转换为 DataSourceConfig 对象
-                result = []
-                for ds_config in data_source_configs:
-                    try:
-                        result.append(DataSourceConfig(**ds_config))
-                    except Exception as e:
-                        print(f"⚠️ [unified_config] 解析数据源配置失败: {e}, 配置: {ds_config}")
-                        continue
-
-                # 按优先级排序（数字越大优先级越高）
-                result.sort(key=lambda x: x.priority, reverse=True)
-                return result
-            else:
-                print("⚠️ [unified_config] 数据库中没有数据源配置，使用硬编码配置")
-        except Exception as e:
-            print(f"⚠️ [unified_config] 从数据库读取数据源配置失败: {e}，使用硬编码配置")
-
-        # 🔥 回退到硬编码配置（兼容性）
-        settings = self.get_system_settings()
-        data_sources = []
-
-        # AKShare (默认启用)
-        akshare_config = DataSourceConfig(
-            name="AKShare",
-            type=DataSourceType.AKSHARE,
-            endpoint="https://akshare.akfamily.xyz",
-            enabled=True,
-            priority=1,
-            description="AKShare开源金融数据接口"
-        )
-        data_sources.append(akshare_config)
-
-        # Tushare (如果有配置)
-        if settings.get("tushare_token"):
-            tushare_config = DataSourceConfig(
-                name="Tushare",
-                type=DataSourceType.TUSHARE,
-                api_key=settings.get("tushare_token"),
-                endpoint="http://api.tushare.pro",
-                enabled=True,
-                priority=2,
-                description="Tushare专业金融数据接口"
-            )
-            data_sources.append(tushare_config)
-
-        # 按优先级排序
-        data_sources.sort(key=lambda x: x.priority, reverse=True)
-        return data_sources
+        db_configs = self._get_data_source_configs_from_db()
+        if db_configs:
+            return db_configs
+        return self._get_fallback_data_source_configs()
 
     async def get_data_source_configs_async(self) -> List[DataSourceConfig]:
         """获取数据源配置 - 优先从数据库读取，回退到硬编码（异步版本）"""
-        try:
-            # 🔥 优先从数据库读取配置（使用异步连接）
-            from app.core.database import get_mongo_db
-            db = get_mongo_db()
-            config_collection = db.system_configs
+        db_configs = self._get_data_source_configs_from_db()
+        if db_configs:
+            return db_configs
+        return self._get_fallback_data_source_configs()
 
-            # 获取最新的激活配置
-            config_data = await config_collection.find_one(
-                {"is_active": True},
-                sort=[("version", -1)]
-            )
-
-            if config_data and config_data.get('data_source_configs'):
-                # 从数据库读取到配置
-                data_source_configs = config_data.get('data_source_configs', [])
-                print(f"✅ [unified_config] 从数据库读取到 {len(data_source_configs)} 个数据源配置")
-
-                # 转换为 DataSourceConfig 对象
-                result = []
-                for ds_config in data_source_configs:
-                    try:
-                        result.append(DataSourceConfig(**ds_config))
-                    except Exception as e:
-                        print(f"⚠️ [unified_config] 解析数据源配置失败: {e}, 配置: {ds_config}")
-                        continue
-
-                # 按优先级排序（数字越大优先级越高）
-                result.sort(key=lambda x: x.priority, reverse=True)
-                return result
-            else:
-                print("⚠️ [unified_config] 数据库中没有数据源配置，使用硬编码配置")
-        except Exception as e:
-            print(f"⚠️ [unified_config] 从数据库读取数据源配置失败: {e}，使用硬编码配置")
-
-        # 🔥 回退到硬编码配置（兼容性）
+    def _get_fallback_data_source_configs(self) -> List[DataSourceConfig]:
+        """回退到硬编码数据源配置"""
         settings = self.get_system_settings()
         data_sources = []
 
-        # AKShare (默认启用)
-        akshare_config = DataSourceConfig(
+        data_sources.append(DataSourceConfig(
             name="AKShare",
             type=DataSourceType.AKSHARE,
             endpoint="https://akshare.akfamily.xyz",
             enabled=True,
             priority=1,
-            description="AKShare开源金融数据接口"
-        )
-        data_sources.append(akshare_config)
+            description="AKShare开源金融数据接口",
+        ))
 
-        # Tushare (如果有配置)
         if settings.get("tushare_token"):
-            tushare_config = DataSourceConfig(
+            data_sources.append(DataSourceConfig(
                 name="Tushare",
                 type=DataSourceType.TUSHARE,
                 api_key=settings.get("tushare_token"),
                 endpoint="http://api.tushare.pro",
                 enabled=True,
                 priority=2,
-                description="Tushare专业金融数据接口"
-            )
-            data_sources.append(tushare_config)
+                description="Tushare专业金融数据接口",
+            ))
 
-        # Finnhub (如果有配置)
         if settings.get("finnhub_api_key"):
-            finnhub_config = DataSourceConfig(
+            data_sources.append(DataSourceConfig(
                 name="Finnhub",
                 type=DataSourceType.FINNHUB,
                 api_key=settings.get("finnhub_api_key"),
                 endpoint="https://finnhub.io/api/v1",
                 enabled=True,
                 priority=3,
-                description="Finnhub股票数据接口"
-            )
-            data_sources.append(finnhub_config)
+                description="Finnhub股票数据接口",
+            ))
 
+        data_sources.sort(key=lambda x: x.priority, reverse=True)
         return data_sources
     
     # ==================== 数据库配置管理 ====================
@@ -411,17 +352,17 @@ class UnifiedConfigManager:
 
         from app.core.config import settings
         
-        # MongoDB配置
-        mongodb_config = DatabaseConfig(
-            name="MongoDB主库",
-            type=DatabaseType.MONGODB,
-            host=os.getenv("MONGODB_HOST", "localhost"),
-            port=int(os.getenv("MONGODB_PORT", "27017")),
-            database=os.getenv("MONGODB_DATABASE", "") or os.getenv("MONGODB_DATABASE_NAME", "") or settings.MONGO_DB,
+        # PostgreSQL 配置
+        pg_config = DatabaseConfig(
+            name="PostgreSQL主库",
+            type=DatabaseType.POSTGRESQL,
+            host=os.getenv("PG_HOST", "localhost"),
+            port=int(os.getenv("PG_PORT", "5432")),
+            database=os.getenv("PG_DATABASE", settings.PG_DATABASE),
             enabled=True,
-            description="MongoDB主数据库"
+            description="PostgreSQL主数据库 (tdx2db K线 + 业务数据)",
         )
-        configs.append(mongodb_config)
+        configs.append(pg_config)
         
         # Redis配置
         redis_config = DatabaseConfig(

@@ -19,6 +19,7 @@ setuptools
 akshare>=1.17.86
 tushare
 baostock
+pytdx>=1.72
 finnhub-python
 parsel
 requests
@@ -36,8 +37,9 @@ dashscope
 streamlit
 plotly
 psutil
-pymongo  # MongoDB数据库支持，用于Token使用记录存储
-motor>=3.3.0  # 异步MongoDB驱动，用于FastAPI后端
+sqlalchemy[asyncio]>=2.0.0  # SQLAlchemy 2.0 异步 ORM
+asyncpg>=0.29.0  # PostgreSQL 异步驱动
+psycopg2-binary>=2.9.0  # PostgreSQL 同步驱动（非异步上下文）
 markdown>=3.4.0  # Markdown处理，用于报告生成
 pypandoc>=1.11  # 文档格式转换，用于导出报告功能
 python-docx>=0.8.11  # Word文档处理，用于修复文本方向

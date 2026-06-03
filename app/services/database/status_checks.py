@@ -6,36 +6,52 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict
 
-from app.core.database import get_mongo_db, get_redis_client
+from sqlalchemy import text
+
+from app.core.database import async_session_factory, get_redis_client
 from app.core.config import settings
 
 
 async def get_mongodb_status() -> Dict[str, Any]:
+    """MongoDB is no longer used; return placeholder."""
+    return {
+        "connected": False,
+        "error": "MongoDB has been migrated to PostgreSQL",
+        "host": "",
+        "port": 0,
+        "database": "",
+        "database_identity": "",
+    }
+
+
+async def get_postgresql_status() -> Dict[str, Any]:
+    """Check PostgreSQL connection status."""
     try:
-        db = get_mongo_db()
-        await db.command("ping")
-        server_info = await db.command("buildInfo")
-        server_status = await db.command("serverStatus")
+        async with async_session_factory() as session:
+            start = datetime.utcnow()
+            await session.execute(text("SELECT 1"))
+            took_ms = (datetime.utcnow() - start).total_seconds() * 1000
         return {
             "connected": True,
-            "host": settings.MONGODB_HOST,
-            "port": settings.MONGODB_PORT,
-            "database": settings.MONGO_DB,
-            "database_identity": settings.MONGO_DB_IDENTITY,
-            "version": server_info.get("version", "Unknown"),
-            "uptime": server_status.get("uptime", 0),
-            "connections": server_status.get("connections", {}),
-            "memory": server_status.get("mem", {}),
+            "host": settings.PG_HOST if hasattr(settings, 'PG_HOST') else "localhost",
+            "port": settings.PG_PORT if hasattr(settings, 'PG_PORT') else 5432,
+            "database": settings.PG_DATABASE if hasattr(settings, 'PG_DATABASE') else "tradetoolkit",
+            "database_identity": "PostgreSQL",
+            "version": "N/A",
+            "uptime": 0,
+            "connections": {},
+            "memory": {},
             "connected_at": datetime.utcnow().isoformat(),
+            "response_time_ms": round(took_ms, 2),
         }
     except Exception as e:
         return {
             "connected": False,
             "error": str(e),
-            "host": settings.MONGODB_HOST,
-            "port": settings.MONGODB_PORT,
-            "database": settings.MONGO_DB,
-            "database_identity": settings.MONGO_DB_IDENTITY,
+            "host": "",
+            "port": 0,
+            "database": "",
+            "database_identity": "PostgreSQL",
         }
 
 
@@ -67,20 +83,25 @@ async def get_redis_status() -> Dict[str, Any]:
 
 
 async def get_database_status() -> Dict[str, Any]:
-    mongodb_status = await get_mongodb_status()
+    postgresql_status = await get_postgresql_status()
     redis_status = await get_redis_status()
-    return {"mongodb": mongodb_status, "redis": redis_status}
+    return {"postgresql": postgresql_status, "redis": redis_status}
 
 
 async def test_mongodb_connection() -> Dict[str, Any]:
+    """MongoDB is no longer used."""
+    return {"success": False, "error": "MongoDB has been migrated to PostgreSQL", "message": "MongoDB已迁移"}
+
+
+async def test_postgresql_connection() -> Dict[str, Any]:
     try:
-        db = get_mongo_db()
-        start = datetime.utcnow()
-        await db.command("ping")
-        took_ms = (datetime.utcnow() - start).total_seconds() * 1000
-        return {"success": True, "response_time_ms": round(took_ms, 2), "message": "MongoDB连接正常"}
+        async with async_session_factory() as session:
+            start = datetime.utcnow()
+            await session.execute(text("SELECT 1"))
+            took_ms = (datetime.utcnow() - start).total_seconds() * 1000
+        return {"success": True, "response_time_ms": round(took_ms, 2), "message": "PostgreSQL连接正常"}
     except Exception as e:
-        return {"success": False, "error": str(e), "message": "MongoDB连接失败"}
+        return {"success": False, "error": str(e), "message": "PostgreSQL连接失败"}
 
 
 async def test_redis_connection() -> Dict[str, Any]:
@@ -95,7 +116,6 @@ async def test_redis_connection() -> Dict[str, Any]:
 
 
 async def test_connections() -> Dict[str, Any]:
-    mongodb = await test_mongodb_connection()
+    postgresql = await test_postgresql_connection()
     redis = await test_redis_connection()
-    return {"mongodb": mongodb, "redis": redis, "overall": mongodb["success"] and redis["success"]}
-
+    return {"postgresql": postgresql, "redis": redis, "overall": postgresql["success"] and redis["success"]}

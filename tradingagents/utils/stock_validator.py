@@ -619,9 +619,9 @@ class StockDataPreparer:
             }
         """
         try:
-            from tradingagents.dataflows.cache.mongodb_cache_adapter import get_mongodb_cache_adapter
+            from tradingagents.dataflows.cache.pg_cache_adapter import get_pg_cache_adapter
 
-            adapter = get_mongodb_cache_adapter()
+            adapter = get_pg_cache_adapter()
             if not adapter.use_app_cache or adapter.db is None:
                 return {
                     "has_data": False,
@@ -924,9 +924,9 @@ class StockDataPreparer:
             list: 数据源列表，按优先级排序 ['tushare', 'akshare', 'baostock']
         """
         try:
-            from tradingagents.dataflows.cache.mongodb_cache_adapter import get_mongodb_cache_adapter
+            from tradingagents.dataflows.cache.pg_cache_adapter import get_pg_cache_adapter
 
-            adapter = get_mongodb_cache_adapter()
+            adapter = get_pg_cache_adapter()
             if adapter.use_app_cache and adapter.db is not None:
                 # 使用 MongoDB 适配器的方法获取优先级
                 priority_order = adapter._get_data_source_priority(stock_code)

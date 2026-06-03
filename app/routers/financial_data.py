@@ -23,7 +23,7 @@ class FinancialSyncRequest(BaseModel):
     """财务数据同步请求"""
     symbols: Optional[List[str]] = Field(None, description="股票代码列表，为空则同步所有股票")
     data_sources: Optional[List[str]] = Field(
-        ["tushare", "akshare", "baostock"], 
+        ["akshare", "baostock"], 
         description="数据源列表"
     )
     report_types: Optional[List[str]] = Field(
@@ -38,7 +38,7 @@ class SingleStockSyncRequest(BaseModel):
     """单股票财务数据同步请求"""
     symbol: str = Field(..., description="股票代码")
     data_sources: Optional[List[str]] = Field(
-        ["tushare", "akshare", "baostock"], 
+        ["akshare", "baostock"], 
         description="数据源列表"
     )
 
@@ -59,7 +59,7 @@ async def query_financial_data(
     
     - **symbol**: 股票代码 (必填)
     - **report_period**: 报告期筛选，格式YYYYMMDD
-    - **data_source**: 数据源筛选 (tushare/akshare/baostock)
+    - **data_source**: 数据源筛选 (akshare/baostock)
     - **report_type**: 报告类型筛选 (quarterly/annual)
     - **limit**: 限制返回数量，默认10条
     """
@@ -96,7 +96,7 @@ async def get_latest_financial_data(
     获取股票最新财务数据
     
     - **symbol**: 股票代码 (必填)
-    - **data_source**: 数据源筛选 (tushare/akshare/baostock)
+    - **data_source**: 数据源筛选 (akshare/baostock)
     """
     try:
         service = await get_financial_data_service()

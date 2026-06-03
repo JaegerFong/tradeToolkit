@@ -63,13 +63,27 @@ except ImportError:
     get_market_quote_dataframe = None
     APP_CACHE_AVAILABLE = False
 
-# 导入 MongoDB 缓存适配器
+# 导入 PG 缓存适配器
 try:
-    from .mongodb_cache_adapter import MongoDBCacheAdapter
-    MONGODB_CACHE_ADAPTER_AVAILABLE = True
+    from .pg_cache_adapter import PgCacheAdapter
+    PG_CACHE_ADAPTER_AVAILABLE = True
 except ImportError:
-    MongoDBCacheAdapter = None
-    MONGODB_CACHE_ADAPTER_AVAILABLE = False
+    PgCacheAdapter = None
+    PG_CACHE_ADAPTER_AVAILABLE = False
+
+# 向后兼容：保持旧名称可用
+try:
+    from .pg_cache_adapter import (
+        get_pg_cache_adapter,
+        get_enhanced_data_adapter,
+        get_stock_data_with_fallback,
+        get_financial_data_with_fallback,
+    )
+except ImportError:
+    get_pg_cache_adapter = None
+    get_enhanced_data_adapter = None
+    get_stock_data_with_fallback = None
+    get_financial_data_with_fallback = None
 
 # 全局缓存实例
 _cache_instance = None
@@ -134,7 +148,12 @@ __all__ = [
     'get_market_quote_dataframe',
     'APP_CACHE_AVAILABLE',
 
-    # MongoDB 缓存适配器
+    # PG 缓存适配器
+    'PgCacheAdapter',
+    'PG_CACHE_ADAPTER_AVAILABLE',
+    'get_pg_cache_adapter',
+
+    # 向后兼容别名
     'MongoDBCacheAdapter',
     'MONGODB_CACHE_ADAPTER_AVAILABLE',
 ]

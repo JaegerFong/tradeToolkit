@@ -360,12 +360,6 @@ const paramKeys = ref<string[]>([])
 const dataSourceTypes = [
   // 中国市场数据源
   {
-    label: 'Tushare',
-    value: 'tushare',
-    register_url: 'https://tushare.pro/weborder/#/login?reg=tacn',
-    register_guide: '如果您还没有 Tushare 账号，请先注册并获取 Token：'
-  },
-  {
     label: 'AKShare',
     value: 'akshare',
     register_url: 'https://akshare.akfamily.xyz/',

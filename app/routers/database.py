@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app.routers.auth_db import get_current_user
-from app.core.database import get_mongo_db, get_redis_client
+from app.core.database import get_redis_client
 from app.services.database_service import DatabaseService
 
 router = APIRouter(prefix="/database", tags=["数据库管理"])
@@ -34,12 +34,12 @@ class ExportRequest(BaseModel):
     """导出请求"""
     collections: List[str] = []  # 空列表表示导出所有集合
     format: str = "json"  # json, csv
-    sanitize: bool = False  # 是否脱敏（清空敏感字段，用于演示系统）
+    sanitize: bool = False  # 是否脱敏
 
 # 响应模型
 class DatabaseStatusResponse(BaseModel):
     """数据库状态响应"""
-    mongodb: Dict[str, Any]
+    postgresql: Dict[str, Any]
     redis: Dict[str, Any]
 
 class DatabaseStatsResponse(BaseModel):
@@ -66,7 +66,7 @@ async def get_database_status(
 ):
     """获取数据库连接状态"""
     try:
-        logger.info(f"🔍 用户 {current_user['username']} 请求数据库状态")
+        logger.info(f"用户 {current_user['username']} 请求数据库状态")
         status_info = await database_service.get_database_status()
         return {
             "success": True,
@@ -86,7 +86,7 @@ async def get_database_stats(
 ):
     """获取数据库统计信息"""
     try:
-        logger.info(f"📊 用户 {current_user['username']} 请求数据库统计")
+        logger.info(f"用户 {current_user['username']} 请求数据库统计")
         stats = await database_service.get_database_stats()
         return {
             "success": True,
@@ -106,7 +106,7 @@ async def test_database_connections(
 ):
     """测试数据库连接"""
     try:
-        logger.info(f"🧪 用户 {current_user['username']} 测试数据库连接")
+        logger.info(f"用户 {current_user['username']} 测试数据库连接")
         results = await database_service.test_connections()
         return {
             "success": True,
@@ -127,7 +127,7 @@ async def create_backup(
 ):
     """创建数据库备份"""
     try:
-        logger.info(f"💾 用户 {current_user['username']} 创建备份: {request.name}")
+        logger.info(f"用户 {current_user['username']} 创建备份: {request.name}")
         backup_info = await database_service.create_backup(
             name=request.name,
             collections=request.collections,
@@ -151,7 +151,7 @@ async def list_backups(
 ):
     """获取备份列表"""
     try:
-        logger.info(f"📋 用户 {current_user['username']} 获取备份列表")
+        logger.info(f"用户 {current_user['username']} 获取备份列表")
         backups = await database_service.list_backups()
         return {
             "success": True,
@@ -174,14 +174,9 @@ async def import_data(
 ):
     """导入数据"""
     try:
-        logger.info(f"📥 用户 {current_user['username']} 导入数据到集合: {collection}")
-        logger.info(f"   文件名: {file.filename}")
-        logger.info(f"   格式: {format}")
-        logger.info(f"   覆盖模式: {overwrite}")
+        logger.info(f"用户 {current_user['username']} 导入数据到集合: {collection}")
 
-        # 读取文件内容
         content = await file.read()
-        logger.info(f"   文件大小: {len(content)} 字节")
 
         result = await database_service.import_data(
             content=content,
@@ -191,15 +186,13 @@ async def import_data(
             filename=file.filename
         )
 
-        logger.info(f"✅ 导入成功: {result}")
-
         return {
             "success": True,
             "message": "数据导入成功",
             "data": result
         }
     except Exception as e:
-        logger.error(f"❌ 导入数据失败: {e}")
+        logger.error(f"导入数据失败: {e}")
         import traceback
         logger.error(traceback.format_exc())
         raise HTTPException(
@@ -215,7 +208,7 @@ async def export_data(
     """导出数据"""
     try:
         sanitize_info = "（脱敏模式）" if request.sanitize else ""
-        logger.info(f"📤 用户 {current_user['username']} 导出数据{sanitize_info}")
+        logger.info(f"用户 {current_user['username']} 导出数据{sanitize_info}")
 
         file_path = await database_service.export_data(
             collections=request.collections,
@@ -242,7 +235,7 @@ async def delete_backup(
 ):
     """删除备份"""
     try:
-        logger.info(f"🗑️ 用户 {current_user['username']} 删除备份: {backup_id}")
+        logger.info(f"用户 {current_user['username']} 删除备份: {backup_id}")
         await database_service.delete_backup(backup_id)
         return {
             "success": True,
@@ -262,7 +255,7 @@ async def cleanup_old_data(
 ):
     """清理旧数据"""
     try:
-        logger.info(f"🧹 用户 {current_user['username']} 清理 {days} 天前的数据")
+        logger.info(f"用户 {current_user['username']} 清理 {days} 天前的数据")
         result = await database_service.cleanup_old_data(days)
         return {
             "success": True,
@@ -283,7 +276,7 @@ async def cleanup_analysis_results(
 ):
     """清理过期分析结果"""
     try:
-        logger.info(f"🧹 用户 {current_user['username']} 清理 {days} 天前的分析结果")
+        logger.info(f"用户 {current_user['username']} 清理 {days} 天前的分析结果")
         result = await database_service.cleanup_analysis_results(days)
         return {
             "success": True,
@@ -304,7 +297,7 @@ async def cleanup_operation_logs(
 ):
     """清理操作日志"""
     try:
-        logger.info(f"🧹 用户 {current_user['username']} 清理 {days} 天前的操作日志")
+        logger.info(f"用户 {current_user['username']} 清理 {days} 天前的操作日志")
         result = await database_service.cleanup_operation_logs(days)
         return {
             "success": True,

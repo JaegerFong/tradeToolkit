@@ -1,34 +1,23 @@
 #!/usr/bin/env bash
 
 # 本地开发环境运行
-# 1.激活本地环境
+# 1. 激活本地环境
 # conda create -n tradeToolkit python=3.10
 # pip install -e .
-# 2.创建mongodb和redis
-# 使用docker-compose-local-dev.yml文件启动MongoDB和Redis
-# docker compose -f docker-compose-local-dev.yml up -d
-# 使用admin账号登录，并进入shell创建用户
-# db.createUser({
-#   user: "traderx",
-#   pwd: "traderx2026",
-#   roles: [
-#     { role: "readWrite", db: "tradingagentscn" }
-#   ]
-# })
-# 3.创建.env文件
-# 4.安装前端依赖（已安装跳过）
-# cd frontend
-# npm install
-# 启动前端
-# cd frontend
-# npm run dev -- --host 0.0.0.0 --port 3000
-# 5.启动后端
-# conda activate trade
-# uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir app --reload-dir tradingagents
+# 2. PostgreSQL (tdx2db K线 + 业务数据) 和 Redis
+# PG 连接信息在 .env 中配置 (PG_HOST/PG_PORT/PG_USER/PG_PASSWORD/PG_DATABASE)
+# Redis 可用 docker compose -f docker-compose.yml up -d redis 启动
+# 3. 创建 .env 文件
+# 4. 前端依赖
+# cd frontend && npm install
+# 5. 启动后端
+# ./scripts/dev.sh backend
+# 6. 启动前端
+# cd frontend && npm run dev -- --host 0.0.0.0 --port 3000
 
 
 # 本地开发启动脚本
-# 前提: MongoDB 和 Redis 已在本地运行
+# 前提: PostgreSQL (参照 .env 配置) 和 Redis 已可用
 # 用法:
 #   ./scripts/dev.sh backend    # 仅启动后端 http://localhost:8000
 #   ./scripts/dev.sh frontend   # 仅启动前端 http://localhost:3000
@@ -54,17 +43,29 @@ check_prerequisites() {
         die "虚拟环境未找到，请先运行: python3 -m venv .venv && .venv/bin/pip install -e ."
     fi
 
-    # 检查 MongoDB
-    if ! command -v mongosh &>/dev/null && ! command -v mongo &>/dev/null; then
-        warn "未检测到 mongo CLI，跳过 MongoDB 连接检查"
+    # 检查 PostgreSQL
+    if "$VENV_PYTHON" -c "
+import asyncpg, os, sys
+from dotenv import load_dotenv
+load_dotenv()
+try:
+    conn = __import__('asyncio').run(asyncpg.connect(
+        host=os.getenv('PG_HOST','localhost'),
+        port=int(os.getenv('PG_PORT','5432')),
+        user=os.getenv('PG_USER',''),
+        password=os.getenv('PG_PASSWORD',''),
+        database=os.getenv('PG_DATABASE','tradingagents'),
+        timeout=5))
+    ver = __import__('asyncio').run(conn.fetchval('SELECT version()'))
+    conn.close()
+    print(f'OK:{ver.split(\",\")[0]}')
+except Exception as e:
+    print(f'FAIL:{e}')
+    sys.exit(1)
+" 2>/dev/null; then
+        log "PostgreSQL 连接正常"
     else
-        local mongo_cmd="mongosh"
-        command -v $mongo_cmd &>/dev/null || mongo_cmd="mongo"
-        if ! $mongo_cmd --quiet --eval "db.runCommand('ping').ok" 2>/dev/null | grep -q "1"; then
-            warn "MongoDB 连接失败，请确认 MongoDB 已启动 (localhost:27017)"
-        else
-            log "MongoDB 连接正常"
-        fi
+        warn "PostgreSQL 连接失败，请确认 PG 已启动 (参照 .env 中 PG_HOST/PG_PORT)"
     fi
 
     # 检查 Redis
@@ -119,7 +120,7 @@ commands:
   frontend   启动前端 (Vite dev server) → http://localhost:3000
   all        同时启动前后端 (后端后台运行，前端前台运行)
 
-前提: MongoDB (:27017) 和 Redis (:6379) 需已启动
+前提: PostgreSQL (参照 .env 配置) 和 Redis (localhost:6379) 需可用
 
 示例:
   $0 backend          # 终端1: 启动后端

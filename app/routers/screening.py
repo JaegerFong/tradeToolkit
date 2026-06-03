@@ -51,7 +51,6 @@ async def get_screening_fields(user: dict = Depends(get_current_user)):
     返回所有可用的筛选字段及其配置信息
     """
     try:
-        # 字段分类
         categories = {
             "basic": ["code", "name", "industry", "area", "market"],
             "market_value": ["total_mv", "circ_mv"],
@@ -74,33 +73,18 @@ async def get_screening_fields(user: dict = Depends(get_current_user)):
 def _convert_legacy_conditions_to_new_format(legacy_conditions: Dict[str, Any]) -> List[ScreeningCondition]:
     """
     将传统格式的筛选条件转换为新格式
-
-    传统格式示例:
-    {
-        "logic": "AND",
-        "children": [
-            {"field": "market_cap", "op": "between", "value": [5000000, 9007199254740991]}
-        ]
-    }
-
-    新格式:
-    [
-        ScreeningCondition(field="total_mv", operator="between", value=[50, 90071992547])
-    ]
     """
     conditions = []
 
-    # 字段名映射（前端可能使用的旧字段名 -> 统一的后端字段名）
     field_mapping = {
-        "market_cap": "total_mv",      # 市值（兼容旧字段名）
-        "pe_ratio": "pe",              # 市盈率（兼容旧字段名）
-        "pb_ratio": "pb",              # 市净率（兼容旧字段名）
-        "turnover": "turnover_rate",   # 换手率（兼容旧字段名）
-        "change_percent": "pct_chg",   # 涨跌幅（兼容旧字段名）
-        "price": "close",              # 价格（兼容旧字段名）
+        "market_cap": "total_mv",
+        "pe_ratio": "pe",
+        "pb_ratio": "pb",
+        "turnover": "turnover_rate",
+        "change_percent": "pct_chg",
+        "price": "close",
     }
 
-    # 操作符映射
     operator_mapping = {
         "between": "between",
         "gt": ">",
@@ -123,15 +107,10 @@ def _convert_legacy_conditions_to_new_format(legacy_conditions: Dict[str, Any]) 
                 value = child.get("value")
 
                 if field and op and value is not None:
-                    # 映射字段名
                     mapped_field = field_mapping.get(field, field)
-
-                    # 映射操作符
                     mapped_op = operator_mapping.get(op, op)
 
-                    # 处理市值单位转换（前端传入的是万元，数据库存储的是亿元）
                     if mapped_field == "total_mv" and isinstance(value, list):
-                        # 将万元转换为亿元
                         converted_value = [v / 10000 for v in value if isinstance(v, (int, float))]
                         logger.info(f"[screening] 市值单位转换: {value} 万元 -> {converted_value} 亿元")
                         value = converted_value
@@ -139,7 +118,6 @@ def _convert_legacy_conditions_to_new_format(legacy_conditions: Dict[str, Any]) 
                         value = value / 10000
                         logger.info(f"[screening] 市值单位转换: {child.get('value')} 万元 -> {value} 亿元")
 
-                    # 创建筛选条件
                     condition = ScreeningCondition(
                         field=mapped_field,
                         operator=mapped_op,
@@ -159,11 +137,9 @@ async def run_screening(req: ScreeningRequest, user: dict = Depends(get_current_
         logger.info(f"[screening] 请求条件: {req.conditions}")
         logger.info(f"[screening] 排序与分页: order_by={req.order_by}, limit={req.limit}, offset={req.offset}")
 
-        # 转换传统格式的条件为新格式
         conditions = _convert_legacy_conditions_to_new_format(req.conditions)
         logger.info(f"[screening] 转换后的条件: {conditions}")
 
-        # 使用增强筛选服务
         result = await enhanced_svc.screen_stocks(
             conditions=conditions,
             market=req.market,
@@ -194,15 +170,11 @@ async def run_screening(req: ScreeningRequest, user: dict = Depends(get_current_
 async def enhanced_screening(req: NewScreeningRequest, user: dict = Depends(get_current_user)):
     """
     增强的股票筛选接口
-    - 支持更丰富的筛选条件格式
-    - 自动选择最优的筛选策略（数据库优化 vs 传统方法）
-    - 提供详细的性能统计信息
     """
     try:
         logger.info(f"[enhanced_screening] 筛选条件: {len(req.conditions)}个")
         logger.info(f"[enhanced_screening] 排序与分页: order_by={req.order_by}, limit={req.limit}, offset={req.offset}")
 
-        # 执行增强筛选
         result = await enhanced_svc.screen_stocks(
             conditions=req.conditions,
             market=req.market,
@@ -231,7 +203,7 @@ async def enhanced_screening(req: NewScreeningRequest, user: dict = Depends(get_
 
 
 # 获取支持的字段信息
-@router.get("/fields", response_model=List[Dict[str, Any]])
+@router.get("/supported-fields", response_model=List[Dict[str, Any]])
 async def get_supported_fields(user: dict = Depends(get_current_user)):
     """获取所有支持的筛选字段信息"""
     try:
@@ -269,8 +241,6 @@ async def validate_conditions(conditions: List[ScreeningCondition], user: dict =
         logger.error(f"[screening] 验证条件失败: {e}")
         raise HTTPException(status_code=500, detail=f"验证条件失败: {str(e)}")
 
-# 重复定义的旧端点移除（保留带日志的版本）
-
 
 @router.get("/industries")
 async def get_industries(user: dict = Depends(get_current_user)):
@@ -280,98 +250,82 @@ async def get_industries(user: dict = Depends(get_current_user)):
     返回按股票数量排序的行业列表
     """
     try:
-        from app.core.database import get_mongo_db
+        from app.core.database import async_session_factory
+        from app.core.pg_models import StockBasicInfo
         from app.core.unified_config import UnifiedConfigManager
+        from sqlalchemy import select, func
 
-        db = get_mongo_db()
-        collection = db["stock_basic_info"]
-
-        # 🔥 获取数据源优先级配置（使用统一配置管理器的异步方法）
         config = UnifiedConfigManager()
         data_source_configs = await config.get_data_source_configs_async()
 
-        # 提取启用的数据源，按优先级排序（已排序）
         enabled_sources = [
             ds.type.lower() for ds in data_source_configs
-            if ds.enabled and ds.type.lower() in ['tushare', 'akshare', 'baostock']
+            if ds.enabled and ds.type.lower() in ['akshare', 'baostock']
         ]
 
         if not enabled_sources:
-            # 如果没有配置，使用默认顺序
-            enabled_sources = ['tushare', 'akshare', 'baostock']
+            enabled_sources = ['akshare', 'baostock']
 
         logger.info(f"[get_industries] 数据源优先级: {enabled_sources}")
 
-        # 🔥 按优先级查询：优先使用优先级最高的数据源
         preferred_source = enabled_sources[0] if enabled_sources else 'tushare'
 
-        # 聚合查询：按行业分组并统计股票数量（只查询指定数据源）
-        pipeline = [
-            {
-                "$match": {
-                    "source": preferred_source,  # 🔥 只查询优先级最高的数据源
-                    "industry": {"$ne": None, "$ne": ""}  # 过滤空行业
-                }
-            },
-            {
-                "$group": {
-                    "_id": "$industry",
-                    "count": {"$sum": 1}
-                }
-            },
-            {"$sort": {"count": -1}},  # 按股票数量降序排序
-            {
-                "$project": {
-                    "industry": "$_id",
-                    "count": 1,
-                    "_id": 0
-                }
-            }
-        ]
+        async with async_session_factory() as session:
+            # 按行业分组统计（替代 MongoDB aggregation）
+            result = await session.execute(
+                select(
+                    StockBasicInfo.industry,
+                    func.count(StockBasicInfo.id).label("count")
+                ).where(
+                    StockBasicInfo.source == preferred_source,
+                    StockBasicInfo.industry.isnot(None),
+                    StockBasicInfo.industry != ""
+                ).group_by(StockBasicInfo.industry).order_by(func.count(StockBasicInfo.id).desc())
+            )
 
-        industries = []
-        async for doc in collection.aggregate(pipeline):
-            # 清洗字段，避免 NaN/Inf 导致 JSON 序列化失败
-            raw_industry = doc.get("industry")
-            safe_industry = ""
-            try:
-                if raw_industry is None:
-                    safe_industry = ""
-                elif isinstance(raw_industry, float):
-                    if raw_industry != raw_industry or raw_industry in (float("inf"), float("-inf")):
+            industries = []
+            for row in result.all():
+                raw_industry = row[0]
+                raw_count = row[1]
+
+                safe_industry = ""
+                try:
+                    if raw_industry is None:
                         safe_industry = ""
+                    elif isinstance(raw_industry, float):
+                        if raw_industry != raw_industry or raw_industry in (float("inf"), float("-inf")):
+                            safe_industry = ""
+                        else:
+                            safe_industry = str(raw_industry)
                     else:
                         safe_industry = str(raw_industry)
-                else:
-                    safe_industry = str(raw_industry)
-            except Exception:
-                safe_industry = ""
+                except Exception:
+                    safe_industry = ""
 
-            raw_count = doc.get("count", 0)
-            safe_count = 0
-            try:
-                if isinstance(raw_count, float):
-                    if raw_count != raw_count or raw_count in (float("inf"), float("-inf")):
-                        safe_count = 0
+                safe_count = 0
+                try:
+                    if isinstance(raw_count, float):
+                        if raw_count != raw_count or raw_count in (float("inf"), float("-inf")):
+                            safe_count = 0
+                        else:
+                            safe_count = int(raw_count)
                     else:
                         safe_count = int(raw_count)
-                else:
-                    safe_count = int(raw_count)
-            except Exception:
-                safe_count = 0
+                except Exception:
+                    safe_count = 0
 
-            industries.append({
-                "value": safe_industry,
-                "label": safe_industry,
-                "count": safe_count,
-            })
+                industries.append({
+                    "value": safe_industry,
+                    "label": safe_industry,
+                    "count": safe_count,
+                })
 
         logger.info(f"[get_industries] 从数据源 {preferred_source} 返回 {len(industries)} 个行业")
 
         return {
             "industries": industries,
             "total": len(industries),
-            "source": preferred_source  # 🔥 返回数据来源
+            "source": preferred_source
         }
 
     except Exception as e:

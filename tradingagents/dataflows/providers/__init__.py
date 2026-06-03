@@ -8,19 +8,15 @@ from .base_provider import BaseStockDataProvider
 try:
     from .china import (
         AKShareProvider,
-        TushareProvider,
         BaostockProvider as BaoStockProvider,
+        TDXProvider,
+        get_tdx_provider,
         AKSHARE_AVAILABLE,
-        TUSHARE_AVAILABLE,
-        BAOSTOCK_AVAILABLE
+        BAOSTOCK_AVAILABLE,
+        TDX_AVAILABLE
     )
 except ImportError:
     # 向后兼容：尝试从旧路径导入
-    try:
-        from .tushare_provider import TushareProvider
-    except ImportError:
-        TushareProvider = None
-
     try:
         from .akshare_provider import AKShareProvider
     except ImportError:
@@ -32,8 +28,10 @@ except ImportError:
         BaoStockProvider = None
 
     AKSHARE_AVAILABLE = AKShareProvider is not None
-    TUSHARE_AVAILABLE = TushareProvider is not None
     BAOSTOCK_AVAILABLE = BaoStockProvider is not None
+    TDXProvider = None
+    get_tdx_provider = None
+    TDX_AVAILABLE = False
 
 # 导入港股提供器
 try:
@@ -89,23 +87,19 @@ try:
 except ImportError:
     FinnhubProvider = None
 
-# TDXProvider 已移除
-# try:
-#     from .tdx_provider import TDXProvider
-# except ImportError:
-#     TDXProvider = None
-
 __all__ = [
     # 基类
     'BaseStockDataProvider',
 
     # 中国市场
-    'TushareProvider',
     'AKShareProvider',
     'BaoStockProvider',
+    'TDXProvider',
+    'get_tdx_provider',
     'AKSHARE_AVAILABLE',
     'TUSHARE_AVAILABLE',
     'BAOSTOCK_AVAILABLE',
+    'TDX_AVAILABLE',
 
     # 港股
     'ImprovedHKStockProvider',
@@ -123,5 +117,4 @@ __all__ = [
     # 其他（预留）
     'YahooProvider',
     'FinnhubProvider',
-    # 'TDXProvider'  # 已移除
 ]

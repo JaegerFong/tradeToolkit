@@ -405,7 +405,7 @@ async def get_sync_history(
 ):
     """获取同步历史记录"""
     try:
-        from app.core.database import get_mongo_db
+        from app.core.pg_adapter import get_pg_db as get_mongo_db
         db = get_mongo_db()
 
         # 构建查询条件
@@ -452,7 +452,7 @@ async def get_stock_sync_coverage(
 ):
     """获取已同步股票列表及每只股票的数据覆盖情况。"""
     try:
-        from app.core.database import get_mongo_db
+        from app.core.pg_adapter import get_pg_db as get_mongo_db
 
         db = get_mongo_db()
         query: Dict[str, Any] = {}
@@ -635,7 +635,7 @@ async def clear_sync_cache():
 
         # 1. 清空同步状态
         try:
-            from app.core.database import get_mongo_db
+            from app.core.pg_adapter import get_pg_db as get_mongo_db
             db = get_mongo_db()
 
             # 删除同步状态记录

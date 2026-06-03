@@ -104,13 +104,13 @@ async def get_stock_list(
 ):
     """
     获取股票列表
-    
+
     Args:
         market: 市场筛选 (可选)
         industry: 行业筛选 (可选)
         page: 页码 (从1开始)
         page_size: 每页大小 (1-100)
-        
+
     Returns:
         StockListResponse: 股票列表数据
     """
@@ -122,10 +122,10 @@ async def get_stock_list(
             page=page,
             page_size=page_size
         )
-        
+
         # 计算总数 (简化实现，实际应该单独查询)
         total = len(stock_list)
-        
+
         return StockListResponse(
             success=True,
             data=stock_list,
@@ -134,7 +134,7 @@ async def get_stock_list(
             page_size=page_size,
             message="获取成功"
         )
-        
+
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -208,67 +208,64 @@ async def search_stocks(
 ):
     """
     搜索股票
-    
+
     Args:
         keyword: 搜索关键词 (股票代码或名称)
         limit: 返回数量限制
-        
+
     Returns:
         dict: 搜索结果
     """
     try:
-        from app.core.database import get_mongo_db
+        from app.core.database import async_session_factory
         from app.core.unified_config import UnifiedConfigManager
+        from app.core.pg_models import StockBasicInfo
+        from sqlalchemy import select, or_
 
-        db = get_mongo_db()
-        collection = db.stock_basic_info
-
-        # 🔥 获取数据源优先级配置
+        # 获取数据源优先级配置
         config = UnifiedConfigManager()
         data_source_configs = await config.get_data_source_configs_async()
 
-        # 提取启用的数据源，按优先级排序
         enabled_sources = [
             ds.type.lower() for ds in data_source_configs
-            if ds.enabled and ds.type.lower() in ['tushare', 'akshare', 'baostock']
+            if ds.enabled and ds.type.lower() in ['akshare', 'baostock']
         ]
 
         if not enabled_sources:
-            enabled_sources = ['tushare', 'akshare', 'baostock']
+            enabled_sources = ['akshare', 'baostock']
 
         preferred_source = enabled_sources[0] if enabled_sources else 'tushare'
 
-        # 构建搜索条件
-        search_conditions = []
+        async with async_session_factory() as session:
+            # 构建搜索条件
+            conditions = []
 
-        # 如果是6位数字，按代码精确匹配
-        if keyword.isdigit() and len(keyword) == 6:
-            search_conditions.append({"symbol": keyword})
-        else:
-            # 按名称模糊匹配
-            search_conditions.append({"name": {"$regex": keyword, "$options": "i"}})
-            # 如果包含数字，也尝试代码匹配
-            if any(c.isdigit() for c in keyword):
-                search_conditions.append({"symbol": {"$regex": keyword}})
+            # 如果是6位数字，按代码精确匹配
+            if keyword.isdigit() and len(keyword) == 6:
+                conditions.append(StockBasicInfo.symbol == keyword)
+                conditions.append(StockBasicInfo.code == keyword)
+            else:
+                # 按名称模糊匹配
+                conditions.append(StockBasicInfo.name.ilike(f"%{keyword}%"))
+                # 如果包含数字，也尝试代码匹配
+                if any(c.isdigit() for c in keyword):
+                    conditions.append(StockBasicInfo.symbol.ilike(f"%{keyword}%"))
+                    conditions.append(StockBasicInfo.code.ilike(f"%{keyword}%"))
 
-        # 🔥 添加数据源筛选：只查询优先级最高的数据源
-        query = {
-            "$and": [
-                {"$or": search_conditions},
-                {"source": preferred_source}
-            ]
-        }
+            query = select(StockBasicInfo).where(
+                or_(*conditions),
+                StockBasicInfo.source == preferred_source
+            ).limit(limit)
 
-        # 执行搜索
-        cursor = collection.find(query, {"_id": 0}).limit(limit)
-
-        results = await cursor.to_list(length=limit)
+            result = await session.execute(query)
+            docs = result.scalars().all()
 
         # 数据标准化
         service = get_stock_data_service()
         standardized_results = []
-        for doc in results:
-            standardized_doc = service._standardize_basic_info(doc)
+        for doc in docs:
+            doc_dict = _model_to_dict(doc)
+            standardized_doc = service._standardize_basic_info(doc_dict)
             standardized_results.append(standardized_doc)
 
         return {
@@ -276,10 +273,10 @@ async def search_stocks(
             "data": standardized_results,
             "total": len(standardized_results),
             "keyword": keyword,
-            "source": preferred_source,  # 🔥 返回数据来源
+            "source": preferred_source,
             "message": "搜索完成"
         }
-        
+
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -298,37 +295,33 @@ async def get_market_summary(
         dict: 各市场的股票数量统计
     """
     try:
-        from app.core.database import get_mongo_db
+        from app.core.database import async_session_factory
+        from app.core.pg_models import StockBasicInfo
+        from sqlalchemy import select, func
 
-        db = get_mongo_db()
-        collection = db.stock_basic_info
+        async with async_session_factory() as session:
+            # 按 market 分组统计 (替代 MongoDB aggregation)
+            result = await session.execute(
+                select(
+                    StockBasicInfo.market,
+                    func.count(StockBasicInfo.id)
+                ).group_by(StockBasicInfo.market).order_by(func.count(StockBasicInfo.id).desc())
+            )
+            market_stats = [{"_id": row[0], "count": row[1]} for row in result.all()]
 
-        # 统计各市场股票数量
-        pipeline = [
-            {
-                "$group": {
-                    "_id": "$market",
-                    "count": {"$sum": 1}
-                }
-            },
-            {
-                "$sort": {"count": -1}
-            }
-        ]
-
-        cursor = collection.aggregate(pipeline)
-        market_stats = await cursor.to_list(length=None)
-
-        # 总数统计
-        total_count = await collection.count_documents({})
+            # 总计数
+            total_result = await session.execute(
+                select(func.count(StockBasicInfo.id))
+            )
+            total_count = total_result.scalar()
 
         return {
             "success": True,
             "data": {
                 "total_stocks": total_count,
                 "market_breakdown": market_stats,
-                "supported_markets": ["CN"],  # 当前支持的市场
-                "last_updated": None  # 可以从数据中获取最新更新时间
+                "supported_markets": ["CN"],
+                "last_updated": None
             },
             "message": "获取成功"
         }
@@ -348,20 +341,7 @@ async def get_quotes_sync_status(
     获取实时行情同步状态
 
     Returns:
-        dict: {
-            "success": True,
-            "data": {
-                "last_sync_time": "2025-10-28 15:06:00",
-                "last_sync_time_iso": "2025-10-28T15:06:00+08:00",
-                "interval_seconds": 360,
-                "interval_minutes": 6,
-                "data_source": "tushare",
-                "success": True,
-                "records_count": 5440,
-                "error_message": None
-            },
-            "message": "获取成功"
-        }
+        dict: 同步状态数据
     """
     try:
         from app.services.quotes_ingestion_service import QuotesIngestionService
@@ -380,3 +360,11 @@ async def get_quotes_sync_status(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"获取同步状态失败: {str(e)}"
         )
+
+
+def _model_to_dict(model_instance):
+    """将 SQLAlchemy 模型实例转换为字典"""
+    if model_instance is None:
+        return {}
+    return {c.name: getattr(model_instance, c.name)
+            for c in model_instance.__table__.columns}

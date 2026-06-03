@@ -20,7 +20,7 @@ from tradingagents.utils.logging_manager import get_logger
 logger = get_logger('agents')
 
 # 导入 MongoDB 缓存适配器
-from .cache.mongodb_cache_adapter import get_mongodb_cache_adapter, get_stock_data_with_fallback, get_financial_data_with_fallback
+from .cache.pg_cache_adapter import get_pg_cache_adapter, get_stock_data_with_fallback, get_financial_data_with_fallback
 
 
 class OptimizedChinaDataProvider:
@@ -119,7 +119,7 @@ class OptimizedChinaDataProvider:
 
         # 1. 优先尝试从MongoDB获取（如果启用了TA_USE_APP_CACHE）
         if not force_refresh:
-            adapter = get_mongodb_cache_adapter()
+            adapter = get_pg_cache_adapter()
             if adapter.use_app_cache:
                 df = adapter.get_historical_data(symbol, start_date, end_date)
                 if df is not None and not df.empty:
@@ -210,7 +210,7 @@ class OptimizedChinaDataProvider:
 
         # 1. 优先尝试从MongoDB获取财务数据（如果启用了TA_USE_APP_CACHE）
         if not force_refresh:
-            adapter = get_mongodb_cache_adapter()
+            adapter = get_pg_cache_adapter()
             if adapter.use_app_cache:
                 financial_data = adapter.get_financial_data(symbol)
                 if financial_data:
@@ -851,16 +851,17 @@ class OptimizedChinaDataProvider:
 
             if db_manager.is_mongodb_available():
                 try:
-                    db_client = db_manager.get_mongodb_client()
-                    db = db_client['tradingagents']
+                    from app.core.pg_models import MarketQuotes
+                    from sqlalchemy import select
+                    session = db_manager.get_mongodb_client()
 
-                    # 标准化股票代码为6位
                     code6 = symbol.replace('.SH', '').replace('.SZ', '').zfill(6)
 
-                    # 从 market_quotes 获取实时股价
-                    quote = db.market_quotes.find_one({"code": code6})
-                    if quote and quote.get("close"):
-                        realtime_price = float(quote.get("close"))
+                    stmt = select(MarketQuotes).where(MarketQuotes.code == code6)
+                    result = session.execute(stmt)
+                    quote = result.scalars().first()
+                    if quote and quote.close:
+                        realtime_price = float(quote.close)
                         logger.info(f"✅ 从 market_quotes 获取实时股价: {code6} = {realtime_price}元 (原价格: {price_value}元)")
                         price_value = realtime_price
                     else:
@@ -868,7 +869,7 @@ class OptimizedChinaDataProvider:
                 except Exception as e:
                     logger.warning(f"⚠️ 从 market_quotes 获取实时股价失败: {e}，使用传入价格: {price_value}元")
             else:
-                logger.info(f"⚠️ MongoDB 不可用，使用传入价格: {price_value}元")
+                logger.info(f"⚠️ PG 不可用，使用传入价格: {price_value}元")
 
             # 第一优先级：从 MongoDB stock_financial_data 集合获取标准化财务数据
             from tradingagents.config.runtime_settings import use_app_cache_enabled
@@ -876,8 +877,8 @@ class OptimizedChinaDataProvider:
                 logger.info(f"🔍 优先从 MongoDB stock_financial_data 集合获取{symbol}财务数据")
 
                 # 直接从 MongoDB 获取标准化的财务数据
-                from tradingagents.dataflows.cache.mongodb_cache_adapter import get_mongodb_cache_adapter
-                adapter = get_mongodb_cache_adapter()
+                from tradingagents.dataflows.cache.pg_cache_adapter import get_pg_cache_adapter
+                adapter = get_pg_cache_adapter()
                 financial_data = adapter.get_financial_data(symbol)
 
                 if financial_data:
@@ -2165,131 +2166,46 @@ def _add_financial_cache_methods():
     """为OptimizedChinaDataProvider类添加财务数据缓存方法"""
 
     def _get_cached_raw_financial_data(self, symbol: str) -> dict:
-        """从数据库缓存获取原始财务数据"""
+        """从数据库缓存获取原始财务数据（PG 版本）"""
         try:
-            from .cache.app_adapter import get_mongodb_client
-            client = get_mongodb_client()
-            if not client:
-                logger.debug(f"📊 [财务缓存] MongoDB客户端不可用")
-                return None
-
-            db = client.get_database('tradingagents')
-
-            # 第一优先级：从 stock_financial_data 集合读取（定时任务同步的持久化数据）
-            stock_financial_collection = db.stock_financial_data
-
-            # 尝试使用 symbol 或 code 字段查询（兼容不同的同步服务）
-            financial_doc = stock_financial_collection.find_one({
-                '$or': [
-                    {'symbol': symbol},
-                    {'code': symbol}
-                ]
-            }, sort=[('updated_at', -1)])
-
-            if financial_doc:
-                logger.info(f"✅ [财务数据] 从 stock_financial_data 集合获取{symbol}财务数据")
-                # 将数据库文档转换为财务数据格式
-                financial_data = {}
-
-                # 提取各类财务数据
-                # 第一优先级：检查 raw_data 字段（Tushare 同步服务使用的结构）
-                if 'raw_data' in financial_doc and isinstance(financial_doc['raw_data'], dict):
-                    raw_data = financial_doc['raw_data']
-                    # 映射字段名：raw_data 中使用 cashflow_statement，我们需要 cash_flow
-                    if 'balance_sheet' in raw_data and raw_data['balance_sheet']:
-                        financial_data['balance_sheet'] = raw_data['balance_sheet']
-                    if 'income_statement' in raw_data and raw_data['income_statement']:
-                        financial_data['income_statement'] = raw_data['income_statement']
-                    if 'cashflow_statement' in raw_data and raw_data['cashflow_statement']:
-                        financial_data['cash_flow'] = raw_data['cashflow_statement']  # 注意字段名映射
-                    if 'financial_indicators' in raw_data and raw_data['financial_indicators']:
-                        financial_data['main_indicators'] = raw_data['financial_indicators']  # 注意字段名映射
-                    if 'main_business' in raw_data and raw_data['main_business']:
-                        financial_data['main_business'] = raw_data['main_business']
-
-                # 第二优先级：检查 financial_data 嵌套字段
-                elif 'financial_data' in financial_doc and isinstance(financial_doc['financial_data'], dict):
-                    nested_data = financial_doc['financial_data']
-                    if 'balance_sheet' in nested_data:
-                        financial_data['balance_sheet'] = nested_data['balance_sheet']
-                    if 'income_statement' in nested_data:
-                        financial_data['income_statement'] = nested_data['income_statement']
-                    if 'cash_flow' in nested_data:
-                        financial_data['cash_flow'] = nested_data['cash_flow']
-                    if 'main_indicators' in nested_data:
-                        financial_data['main_indicators'] = nested_data['main_indicators']
-
-                # 第三优先级：直接从文档根级别读取
-                else:
-                    if 'balance_sheet' in financial_doc and financial_doc['balance_sheet']:
-                        financial_data['balance_sheet'] = financial_doc['balance_sheet']
-                    if 'income_statement' in financial_doc and financial_doc['income_statement']:
-                        financial_data['income_statement'] = financial_doc['income_statement']
-                    if 'cash_flow' in financial_doc and financial_doc['cash_flow']:
-                        financial_data['cash_flow'] = financial_doc['cash_flow']
-                    if 'main_indicators' in financial_doc and financial_doc['main_indicators']:
-                        financial_data['main_indicators'] = financial_doc['main_indicators']
-
+            from .cache.pg_cache_adapter import get_pg_cache_adapter
+            adapter = get_pg_cache_adapter()
+            if adapter and adapter.use_app_cache:
+                financial_data = adapter.get_financial_data(symbol)
                 if financial_data:
-                    logger.info(f"📊 [财务数据] 成功提取{symbol}的财务数据，包含字段: {list(financial_data.keys())}")
-                    return financial_data
+                    logger.info(f"✅ [财务数据] 从 PG stock_financial_data 获取{symbol}财务数据")
+                    result = {
+                        'balance_sheet': financial_data,
+                        'income_statement': financial_data,
+                        'cash_flow': financial_data,
+                        'main_indicators': financial_data,
+                    }
+                    return result
                 else:
-                    logger.warning(f"⚠️ [财务数据] {symbol}的 stock_financial_data 记录存在但无有效财务数据字段")
+                    logger.debug(f"📊 [财务数据] PG stock_financial_data 中未找到{symbol}的记录")
             else:
-                logger.debug(f"📊 [财务数据] stock_financial_data 集合中未找到{symbol}的记录")
-
-            # 第二优先级：从 financial_data_cache 集合读取（临时缓存）
-            collection = db.financial_data_cache
-
-            # 查找缓存的原始财务数据
-            cache_doc = collection.find_one({
-                'symbol': symbol,
-                'cache_type': 'raw_financial_data'
-            }, sort=[('updated_at', -1)])
-
-            if cache_doc:
-                # 检查缓存是否过期（24小时）
-                from datetime import datetime, timedelta
-                cache_time = cache_doc.get('updated_at')
-                if cache_time and datetime.now() - cache_time < timedelta(hours=24):
-                    financial_data = cache_doc.get('financial_data', {})
-                    if financial_data:
-                        logger.info(f"✅ [财务缓存] 从 financial_data_cache 获取{symbol}原始财务数据")
-                        return financial_data
-                else:
-                    logger.debug(f"📊 [财务缓存] {symbol}原始财务数据缓存已过期")
-            else:
-                logger.debug(f"📊 [财务缓存] 未找到{symbol}原始财务数据缓存")
-
+                logger.debug(f"📊 [财务缓存] PG缓存适配器不可用")
         except Exception as e:
             logger.debug(f"📊 [财务缓存] 获取{symbol}原始财务数据缓存失败: {e}")
-
         return None
 
     def _get_cached_stock_info(self, symbol: str) -> dict:
-        """从数据库缓存获取股票基本信息"""
+        """从数据库缓存获取股票基本信息（PG 版本）"""
         try:
-            from .cache.app_adapter import get_mongodb_client
-            client = get_mongodb_client()
-            if not client:
-                return {}
-
-            db = client.get_database('tradingagents')
-            collection = db.stock_basic_info
-
-            # 查找股票基本信息
-            doc = collection.find_one({'code': symbol})
-            if doc:
-                return {
-                    'symbol': symbol,
-                    'name': doc.get('name', ''),
-                    'industry': doc.get('industry', ''),
-                    'market': doc.get('market', ''),
-                    'source': 'database_cache'
-                }
+            from .cache.pg_cache_adapter import get_pg_cache_adapter
+            adapter = get_pg_cache_adapter()
+            if adapter and adapter.use_app_cache:
+                info = adapter.get_stock_basic_info(symbol)
+                if info:
+                    return {
+                        'symbol': symbol,
+                        'name': info.get('name', ''),
+                        'industry': info.get('industry', ''),
+                        'market': info.get('market', ''),
+                        'source': 'database_cache'
+                    }
         except Exception as e:
             logger.debug(f"📊 获取{symbol}股票基本信息缓存失败: {e}")
-
         return {}
 
     def _restore_financial_data_format(self, cached_data: dict) -> dict:
@@ -2311,52 +2227,8 @@ def _add_financial_cache_methods():
             return cached_data
 
     def _cache_raw_financial_data(self, symbol: str, financial_data: dict, stock_info: dict):
-        """将原始财务数据缓存到数据库"""
-        try:
-            from tradingagents.config.runtime_settings import use_app_cache_enabled
-            if not use_app_cache_enabled(False):
-                logger.debug(f"📊 [财务缓存] 应用缓存未启用，跳过缓存保存")
-                return
-
-            from .cache.app_adapter import get_mongodb_client
-            client = get_mongodb_client()
-            if not client:
-                logger.debug(f"📊 [财务缓存] MongoDB客户端不可用")
-                return
-
-            db = client.get_database('tradingagents')
-            collection = db.financial_data_cache
-
-            from datetime import datetime
-
-            # 将DataFrame转换为可序列化的格式
-            serializable_data = {}
-            for key, value in financial_data.items():
-                if hasattr(value, 'to_dict'):  # pandas DataFrame
-                    serializable_data[key] = value.to_dict('records')
-                else:
-                    serializable_data[key] = value
-
-            cache_doc = {
-                'symbol': symbol,
-                'cache_type': 'raw_financial_data',
-                'financial_data': serializable_data,
-                'stock_info': stock_info,
-                'updated_at': datetime.now()
-            }
-
-            # 使用upsert更新或插入
-            collection.replace_one(
-                {'symbol': symbol, 'cache_type': 'raw_financial_data'},
-                cache_doc,
-                upsert=True
-            )
-
-            logger.info(f"✅ [财务缓存] {symbol}原始财务数据已缓存到数据库")
-
-        except Exception as e:
-            logger.debug(f"📊 [财务缓存] 缓存{symbol}原始财务数据失败: {e}")
-
+        """将原始财务数据缓存到数据库（PG 版本 - 跳过，数据已在同步时持久化）"""
+        logger.debug(f"📊 [财务缓存] PG 模式下无需单独缓存，数据已在同步时持久化")
     # 将方法添加到类中
     OptimizedChinaDataProvider._get_cached_raw_financial_data = _get_cached_raw_financial_data
     OptimizedChinaDataProvider._get_cached_stock_info = _get_cached_stock_info

@@ -42,20 +42,20 @@ logger = get_logger('agents')
 from .usage_models import UsageRecord, ModelConfig, PricingConfig
 
 try:
-    from .mongodb_storage import MongoDBStorage
-    MONGODB_AVAILABLE = True
+    from .pg_storage import PgStorage
+    PG_STORAGE_AVAILABLE = True
 except ImportError as e:
-    logger.error(f"❌ [ConfigManager] 导入 MongoDBStorage 失败 (ImportError): {e}")
+    logger.error(f"❌ [ConfigManager] 导入 PgStorage 失败 (ImportError): {e}")
     import traceback
     logger.error(f"   堆栈: {traceback.format_exc()}")
-    MONGODB_AVAILABLE = False
-    MongoDBStorage = None
+    PG_STORAGE_AVAILABLE = False
+    PgStorage = None
 except Exception as e:
-    logger.error(f"❌ [ConfigManager] 导入 MongoDBStorage 失败 (Exception): {e}")
+    logger.error(f"❌ [ConfigManager] 导入 PgStorage 失败 (Exception): {e}")
     import traceback
     logger.error(f"   堆栈: {traceback.format_exc()}")
-    MONGODB_AVAILABLE = False
-    MongoDBStorage = None
+    PG_STORAGE_AVAILABLE = False
+    PgStorage = None
 
 
 class ConfigManager:
@@ -73,9 +73,9 @@ class ConfigManager:
         # 加载.env文件（保持向后兼容）
         self._load_env_file()
 
-        # 初始化MongoDB存储（如果可用）
-        self.mongodb_storage = None
-        self._init_mongodb_storage()
+        # 初始化PG存储（如果可用）
+        self.pg_storage = None
+        self._init_pg_storage()
 
         self._init_default_configs()
 
@@ -149,62 +149,46 @@ class ConfigManager:
         
         return True
     
-    def _init_mongodb_storage(self):
-        """初始化MongoDB存储"""
-        logger.info("🔧 [ConfigManager] 开始初始化 MongoDB 存储...")
+    def _init_pg_storage(self):
+        """初始化 PG 存储"""
+        logger.info("🔧 [ConfigManager] 开始初始化 PG 存储...")
 
-        if not MONGODB_AVAILABLE:
-            logger.warning("⚠️ [ConfigManager] pymongo 未安装，无法使用 MongoDB 存储")
+        if not PG_STORAGE_AVAILABLE:
+            logger.warning("⚠️ [ConfigManager] PgStorage 不可用，无法使用 PG 存储")
             return
 
-        # 检查是否启用MongoDB存储
-        use_mongodb_env = os.getenv("USE_MONGODB_STORAGE", "false")
-        use_mongodb = use_mongodb_env.lower() == "true"
+        # 检查是否启用 PG 存储
+        use_pg_env = os.getenv("USE_PG_STORAGE", "false")
+        use_pg = use_pg_env.lower() == "true"
 
-        logger.info(f"🔍 [ConfigManager] USE_MONGODB_STORAGE={use_mongodb_env} (解析为: {use_mongodb})")
+        logger.info(f"🔍 [ConfigManager] USE_PG_STORAGE={use_pg_env} (解析为: {use_pg})")
 
-        if not use_mongodb:
-            logger.info("ℹ️ [ConfigManager] MongoDB 存储未启用，将使用 JSON 文件存储")
+        if not use_pg:
+            logger.info("ℹ️ [ConfigManager] PG 存储未启用，将使用 JSON 文件存储")
             return
 
         try:
-            connection_string = os.getenv("MONGODB_CONNECTION_STRING", "").strip()
-            if not connection_string:
-                # 回退到主配置 MONGODB_HOST/PORT/USERNAME/PASSWORD/AUTH_SOURCE
-                mongo_host = os.getenv("MONGODB_HOST", "localhost")
-                mongo_port = os.getenv("MONGODB_PORT", "27017")
-                mongo_user = os.getenv("MONGODB_USERNAME", "")
-                mongo_pass = os.getenv("MONGODB_PASSWORD", "")
-                mongo_auth = os.getenv("MONGODB_AUTH_SOURCE", "admin")
-                if mongo_user and mongo_pass:
-                    connection_string = f"mongodb://{mongo_user}:{mongo_pass}@{mongo_host}:{mongo_port}/?authSource={mongo_auth}"
-                else:
-                    connection_string = f"mongodb://{mongo_host}:{mongo_port}/"
+            pg_uri = os.getenv("TRADINGAGENTS_PG_URI", "").strip()
+            database_name = os.getenv("TRADINGAGENTS_PG_DATABASE", "").strip() or "tradingagents"
 
-            database_name = os.getenv("MONGODB_DATABASE_NAME", "").strip() or os.getenv("MONGODB_DATABASE", "").strip() or "tradingagents"
+            logger.info(f"🔍 [ConfigManager] TRADINGAGENTS_PG_URI={'已设置' if pg_uri else '使用默认连接'}")
+            logger.info(f"🔍 [ConfigManager] TRADINGAGENTS_PG_DATABASE={database_name}")
 
-            logger.info(f"🔍 [ConfigManager] MONGODB_CONNECTION_STRING={'已设置' if connection_string else '未设置'}")
-            logger.info(f"🔍 [ConfigManager] MONGODB_DATABASE_NAME={database_name}")
-
-            if not connection_string:
-                logger.error("❌ [ConfigManager] MONGODB_CONNECTION_STRING 未设置，无法初始化 MongoDB 存储")
-                return
-
-            logger.info(f"🔄 [ConfigManager] 正在创建 MongoDBStorage 实例...")
-            self.mongodb_storage = MongoDBStorage(
-                connection_string=connection_string,
+            logger.info(f"🔄 [ConfigManager] 正在创建 PgStorage 实例...")
+            self.pg_storage = PgStorage(
+                connection_uri=pg_uri if pg_uri else None,
                 database_name=database_name
             )
 
-            if self.mongodb_storage.is_connected():
-                logger.info(f"✅ [ConfigManager] MongoDB存储已启用: {database_name}.token_usage")
+            if self.pg_storage.is_connected():
+                logger.info(f"✅ [ConfigManager] PG 存储已启用: {database_name}.token_usage")
             else:
-                self.mongodb_storage = None
-                logger.warning("⚠️ [ConfigManager] MongoDB连接失败，将使用JSON文件存储")
+                self.pg_storage = None
+                logger.warning("⚠️ [ConfigManager] PG 连接失败，将使用JSON文件存储")
 
         except Exception as e:
-            logger.error(f"❌ [ConfigManager] MongoDB初始化失败: {e}", exc_info=True)
-            self.mongodb_storage = None
+            logger.error(f"❌ [ConfigManager] PG 存储初始化失败: {e}", exc_info=True)
+            self.pg_storage = None
 
     def _init_default_configs(self):
         """初始化默认配置"""
@@ -417,22 +401,21 @@ class ConfigManager:
         # 🔍 详细日志：记录保存位置
         logger.info(f"💾 [Token记录] 准备保存: {provider}/{model_name}, 输入={input_tokens}, 输出={output_tokens}, 成本=¥{cost:.4f}, session={session_id}")
 
-        # 优先使用MongoDB存储
-        if self.mongodb_storage and self.mongodb_storage.is_connected():
-            logger.info(f"📊 [Token记录] 使用 MongoDB 存储 (数据库: {self.mongodb_storage.database_name}, 集合: {self.mongodb_storage.collection_name})")
-            success = self.mongodb_storage.save_usage_record(record)
+        # 优先使用PG存储
+        if self.pg_storage and self.pg_storage.is_connected():
+            logger.info(f"📊 [Token记录] 使用 PG 存储 (数据库: {self.pg_storage.database_name}, 表: {self.pg_storage.collection_name})")
+            success = self.pg_storage.save_usage_record(record)
             if success:
-                logger.info(f"✅ [Token记录] MongoDB 保存成功: {provider}/{model_name}")
+                logger.info(f"✅ [Token记录] PG 保存成功: {provider}/{model_name}")
                 return record
             else:
-                logger.error(f"⚠️ [Token记录] MongoDB保存失败，回退到JSON文件存储")
+                logger.error(f"⚠️ [Token记录] PG 保存失败，回退到JSON文件存储")
         else:
-            # 🔍 详细日志：为什么没有使用MongoDB
-            if self.mongodb_storage is None:
-                logger.warning(f"⚠️ [Token记录] MongoDB存储未初始化 (mongodb_storage=None)")
-                logger.warning(f"   💡 请检查环境变量: USE_MONGODB_STORAGE={os.getenv('USE_MONGODB_STORAGE', '未设置')}")
-            elif not self.mongodb_storage.is_connected():
-                logger.warning(f"⚠️ [Token记录] MongoDB未连接 (is_connected=False)")
+            if self.pg_storage is None:
+                logger.warning(f"⚠️ [Token记录] PG 存储未初始化 (pg_storage=None)")
+                logger.warning(f"   💡 请检查环境变量: USE_PG_STORAGE={os.getenv('USE_PG_STORAGE', '未设置')}")
+            elif not self.pg_storage.is_connected():
+                logger.warning(f"⚠️ [Token记录] PG 未连接 (is_connected=False)")
 
             logger.info(f"📄 [Token记录] 使用 JSON 文件存储: {self.usage_file}")
 
@@ -570,20 +553,18 @@ class ConfigManager:
     
     def get_usage_statistics(self, days: int = 30) -> Dict[str, Any]:
         """获取使用统计"""
-        # 优先使用MongoDB获取统计
-        if self.mongodb_storage and self.mongodb_storage.is_connected():
+        # 优先使用PG获取统计
+        if self.pg_storage and self.pg_storage.is_connected():
             try:
-                # 从MongoDB获取基础统计
-                stats = self.mongodb_storage.get_usage_statistics(days)
-                # 获取供应商统计
-                provider_stats = self.mongodb_storage.get_provider_statistics(days)
-                
+                stats = self.pg_storage.get_usage_statistics(days)
+                provider_stats = self.pg_storage.get_provider_statistics(days)
+
                 if stats:
                     stats["provider_stats"] = provider_stats
                     stats["records_count"] = stats.get("total_requests", 0)
                     return stats
             except Exception as e:
-                logger.error(f"⚠️ MongoDB统计获取失败，回退到JSON文件: {e}")
+                logger.error(f"⚠️ PG 统计获取失败，回退到JSON文件: {e}")
         
         # 回退到JSON文件统计
         records = self.load_usage_records()

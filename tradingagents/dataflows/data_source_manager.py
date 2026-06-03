@@ -59,8 +59,8 @@ class DataSourceManager:
 
     def __init__(self):
         """初始化数据源管理器"""
-        # 检查是否启用MongoDB缓存
-        self.use_mongodb_cache = self._check_mongodb_enabled()
+        # 检查是否启用PG缓存
+        self.use_pg_cache = self._check_pg_enabled()
 
         self.default_source = self._get_default_source()
         self.available_sources = self._check_available_sources()
@@ -78,12 +78,12 @@ class DataSourceManager:
             logger.warning(f"⚠️ 统一缓存管理器初始化失败: {e}")
 
         logger.info(f"📊 数据源管理器初始化完成")
-        logger.info(f"   MongoDB缓存: {'✅ 已启用' if self.use_mongodb_cache else '❌ 未启用'}")
+        logger.info(f"   MongoDB缓存: {'✅ 已启用' if self.use_pg_cache else '❌ 未启用'}")
         logger.info(f"   统一缓存: {'✅ 已启用' if self.cache_enabled else '❌ 未启用'}")
         logger.info(f"   默认数据源: {self.default_source.value}")
         logger.info(f"   可用数据源: {[s.value for s in self.available_sources]}")
 
-    def _check_mongodb_enabled(self) -> bool:
+    def _check_pg_enabled(self) -> bool:
         """检查是否启用MongoDB缓存"""
         from tradingagents.config.runtime_settings import use_app_cache_enabled
         return use_app_cache_enabled()
@@ -103,18 +103,21 @@ class DataSourceManager:
 
         try:
             # 🔥 从数据库读取数据源配置（使用同步客户端）
-            from app.core.database import get_mongo_db_sync
-            db = get_mongo_db_sync()
-            config_collection = db.system_configs
+            from app.core.database import sync_session_factory
+            from app.core.pg_models import SystemConfig
+            from sqlalchemy import select as _select, desc as _desc
+            _session = sync_session_factory()
+            # PG: using SystemConfig model instead of db.system_configs
 
             # 获取最新的激活配置
-            config_data = config_collection.find_one(
-                {"is_active": True},
-                sort=[("version", -1)]
-            )
+            stmt = _select(SystemConfig).where(
+                SystemConfig.is_active == True
+            ).order_by(_desc(SystemConfig.version)).limit(1)
+            result = _session.execute(stmt)
+            config_data = result.scalars().first()
 
-            if config_data and config_data.get('data_source_configs'):
-                data_source_configs = config_data.get('data_source_configs', [])
+            if config_data and config_data.data_source_configs:
+                data_source_configs = config_data.data_source_configs or []
 
                 # 🔥 过滤出启用的数据源，并按市场分类过滤
                 enabled_sources = []
@@ -206,7 +209,7 @@ class DataSourceManager:
     def _get_default_source(self) -> ChinaDataSource:
         """获取默认数据源"""
         # 如果启用MongoDB缓存，MongoDB作为最高优先级数据源
-        if self.use_mongodb_cache:
+        if self.use_pg_cache:
             return ChinaDataSource.MONGODB
 
         # 从环境变量获取，默认使用AKShare作为第一优先级数据源
@@ -269,7 +272,7 @@ class DataSourceManager:
         try:
             # 根据数据源调用相应的获取方法
             if self.current_source == ChinaDataSource.MONGODB:
-                result = self._get_mongodb_fundamentals(symbol)
+                result = self._get_pg_cache_fundamentals(symbol)
             elif self.current_source == ChinaDataSource.TUSHARE:
                 result = self._get_tushare_fundamentals(symbol)
             elif self.current_source == ChinaDataSource.AKSHARE:
@@ -353,7 +356,7 @@ class DataSourceManager:
         try:
             # 根据数据源调用相应的获取方法
             if self.current_source == ChinaDataSource.MONGODB:
-                result = self._get_mongodb_news(symbol, hours_back, limit)
+                result = self._get_pg_cache_news(symbol, hours_back, limit)
             elif self.current_source == ChinaDataSource.TUSHARE:
                 result = self._get_tushare_news(symbol, hours_back, limit)
             elif self.current_source == ChinaDataSource.AKSHARE:
@@ -415,18 +418,21 @@ class DataSourceManager:
         # 🔥 从数据库读取数据源配置，获取启用状态
         enabled_sources_in_db = set()
         try:
-            from app.core.database import get_mongo_db_sync
-            db = get_mongo_db_sync()
-            config_collection = db.system_configs
+            from app.core.database import sync_session_factory
+            from app.core.pg_models import SystemConfig
+            from sqlalchemy import select as _select, desc as _desc
+            _session = sync_session_factory()
+            # PG: using SystemConfig model instead of db.system_configs
 
             # 获取最新的激活配置
-            config_data = config_collection.find_one(
-                {"is_active": True},
-                sort=[("version", -1)]
-            )
+            stmt = _select(SystemConfig).where(
+                SystemConfig.is_active == True
+            ).order_by(_desc(SystemConfig.version)).limit(1)
+            result = _session.execute(stmt)
+            config_data = result.scalars().first()
 
-            if config_data and config_data.get('data_source_configs'):
-                data_source_configs = config_data.get('data_source_configs', [])
+            if config_data and config_data.data_source_configs:
+                data_source_configs = config_data.data_source_configs or []
 
                 # 提取已启用的数据源类型
                 for ds in data_source_configs:
@@ -445,10 +451,10 @@ class DataSourceManager:
             enabled_sources_in_db = {'mongodb', 'tushare', 'akshare', 'baostock'}
 
         # 检查MongoDB（最高优先级）
-        if self.use_mongodb_cache and 'mongodb' in enabled_sources_in_db:
+        if self.use_pg_cache and 'mongodb' in enabled_sources_in_db:
             try:
-                from tradingagents.dataflows.cache.mongodb_cache_adapter import get_mongodb_cache_adapter
-                adapter = get_mongodb_cache_adapter()
+                from tradingagents.dataflows.cache.pg_cache_adapter import get_pg_cache_adapter
+                adapter = get_pg_cache_adapter()
                 if adapter.use_app_cache and adapter.db is not None:
                     available.append(ChinaDataSource.MONGODB)
                     logger.info("✅ MongoDB数据源可用且已启用（最高优先级）")
@@ -456,7 +462,7 @@ class DataSourceManager:
                     logger.warning("⚠️ MongoDB数据源不可用: 数据库未连接")
             except Exception as e:
                 logger.warning(f"⚠️ MongoDB数据源不可用: {e}")
-        elif self.use_mongodb_cache and 'mongodb' not in enabled_sources_in_db:
+        elif self.use_pg_cache and 'mongodb' not in enabled_sources_in_db:
             logger.info("ℹ️ MongoDB数据源已在数据库中禁用")
 
         # 从数据库读取数据源配置
@@ -509,16 +515,20 @@ class DataSourceManager:
     def _get_datasource_configs_from_db(self) -> dict:
         """从数据库读取数据源配置（包括 API Key）"""
         try:
-            from app.core.database import get_mongo_db_sync
-            db = get_mongo_db_sync()
+            from app.core.database import sync_session_factory
+            from app.core.pg_models import SystemConfig
+            from sqlalchemy import select as _select, desc as _desc
+            _session = sync_session_factory()
 
             # 从 system_configs 集合读取激活的配置
-            config = db.system_configs.find_one({"is_active": True})
+            stmt = _select(SystemConfig).where(SystemConfig.is_active == True).order_by(_desc(SystemConfig.version)).limit(1)
+            result = _session.execute(stmt)
+            config = result.scalars().first()
             if not config:
                 return {}
 
             # 提取数据源配置
-            datasource_configs = config.get('data_source_configs', [])
+            datasource_configs = config.data_source_configs or []
 
             # 构建配置字典 {数据源名称: {api_key, api_secret, ...}}
             result = {}
@@ -552,7 +562,7 @@ class DataSourceManager:
     def get_data_adapter(self):
         """获取当前数据源的适配器"""
         if self.current_source == ChinaDataSource.MONGODB:
-            return self._get_mongodb_adapter()
+            return self._get_pg_adapter()
         elif self.current_source == ChinaDataSource.TUSHARE:
             return self._get_tushare_adapter()
         elif self.current_source == ChinaDataSource.AKSHARE:
@@ -563,11 +573,11 @@ class DataSourceManager:
         else:
             raise ValueError(f"不支持的数据源: {self.current_source}")
 
-    def _get_mongodb_adapter(self):
+    def _get_pg_adapter(self):
         """获取MongoDB适配器"""
         try:
-            from tradingagents.dataflows.cache.mongodb_cache_adapter import get_mongodb_cache_adapter
-            return get_mongodb_cache_adapter()
+            from tradingagents.dataflows.cache.pg_cache_adapter import get_pg_cache_adapter
+            return get_pg_cache_adapter()
         except ImportError as e:
             logger.error(f"❌ MongoDB适配器导入失败: {e}")
             return None
@@ -927,8 +937,8 @@ class DataSourceManager:
             # 尝试当前数据源
             df = None
             if self.current_source == ChinaDataSource.MONGODB:
-                from tradingagents.dataflows.cache.mongodb_cache_adapter import get_mongodb_cache_adapter
-                adapter = get_mongodb_cache_adapter()
+                from tradingagents.dataflows.cache.pg_cache_adapter import get_pg_cache_adapter
+                adapter = get_pg_cache_adapter()
                 df = adapter.get_historical_data(symbol, start_date, end_date, period=period)
             elif self.current_source == ChinaDataSource.TUSHARE:
                 from .providers.china.tushare import get_tushare_provider
@@ -954,8 +964,8 @@ class DataSourceManager:
                     continue
                 try:
                     if source == ChinaDataSource.MONGODB:
-                        from tradingagents.dataflows.cache.mongodb_cache_adapter import get_mongodb_cache_adapter
-                        adapter = get_mongodb_cache_adapter()
+                        from tradingagents.dataflows.cache.pg_cache_adapter import get_pg_cache_adapter
+                        adapter = get_pg_cache_adapter()
                         df = adapter.get_historical_data(symbol, start_date, end_date, period=period)
                     elif source == ChinaDataSource.TUSHARE:
                         from .providers.china.tushare import get_tushare_provider
@@ -1065,7 +1075,7 @@ class DataSourceManager:
             actual_source = None  # 实际使用的数据源
 
             if self.current_source == ChinaDataSource.MONGODB:
-                result, actual_source = self._get_mongodb_data(symbol, start_date, end_date, period)
+                result, actual_source = self._get_pg_cache_data(symbol, start_date, end_date, period)
             elif self.current_source == ChinaDataSource.TUSHARE:
                 logger.info(f"🔍 [股票代码追踪] 调用 Tushare 数据源，传入参数: symbol='{symbol}', period='{period}'")
                 result = self._get_tushare_data(symbol, start_date, end_date, period)
@@ -1140,7 +1150,7 @@ class DataSourceManager:
                         }, exc_info=True)
             return self._try_fallback_sources(symbol, start_date, end_date)
 
-    def _get_mongodb_data(self, symbol: str, start_date: str, end_date: str, period: str = "daily") -> tuple[str, str | None]:
+    def _get_pg_cache_data(self, symbol: str, start_date: str, end_date: str, period: str = "daily") -> tuple[str, str | None]:
         """
         从MongoDB获取多周期数据 - 包含技术指标计算
 
@@ -1150,8 +1160,8 @@ class DataSourceManager:
         logger.debug(f"📊 [MongoDB] 调用参数: symbol={symbol}, start_date={start_date}, end_date={end_date}, period={period}")
 
         try:
-            from tradingagents.dataflows.cache.mongodb_cache_adapter import get_mongodb_cache_adapter
-            adapter = get_mongodb_cache_adapter()
+            from tradingagents.dataflows.cache.pg_cache_adapter import get_pg_cache_adapter
+            adapter = get_pg_cache_adapter()
 
             # 从MongoDB获取指定周期的历史数据
             df = adapter.get_historical_data(symbol, start_date, end_date, period=period)
@@ -1546,17 +1556,23 @@ class DataSourceManager:
             # 返回所有股票列表
             logger.info("📊 获取所有股票列表")
             try:
-                # 尝试从 MongoDB 获取
-                from tradingagents.config.database_manager import get_database_manager
-                db_manager = get_database_manager()
-                if db_manager and db_manager.is_mongodb_available():
-                    collection = db_manager.mongodb_db['stock_basic_info']
-                    stocks = list(collection.find({}, {'_id': 0}))
+                # 尝试从 PG 获取
+                from app.core.pg_models import StockBasicInfo
+                from sqlalchemy import select
+                from app.core.database import sync_session_factory
+                session = sync_session_factory()
+                try:
+                    stmt = select(StockBasicInfo)
+                    result = session.execute(stmt)
+                    rows = result.scalars().all()
+                    stocks = [{"code": r.code, "name": r.name, "source": r.source} for r in rows]
                     if stocks:
-                        logger.info(f"✅ 从MongoDB获取所有股票: {len(stocks)}条")
+                        logger.info(f"✅ 从PG获取所有股票: {len(stocks)}条")
                         return stocks
+                finally:
+                    session.close()
             except Exception as e:
-                logger.warning(f"⚠️ 从MongoDB获取所有股票失败: {e}")
+                logger.warning(f"⚠️ 从PG获取所有股票失败: {e}")
 
             # 降级：返回空列表
             return []
@@ -1785,14 +1801,14 @@ class DataSourceManager:
 
     # ==================== 基本面数据获取方法 ====================
 
-    def _get_mongodb_fundamentals(self, symbol: str) -> str:
+    def _get_pg_cache_fundamentals(self, symbol: str) -> str:
         """从 MongoDB 获取财务数据"""
         logger.debug(f"📊 [MongoDB] 调用参数: symbol={symbol}")
 
         try:
-            from tradingagents.dataflows.cache.mongodb_cache_adapter import get_mongodb_cache_adapter
+            from tradingagents.dataflows.cache.pg_cache_adapter import get_pg_cache_adapter
             import pandas as pd
-            adapter = get_mongodb_cache_adapter()
+            adapter = get_pg_cache_adapter()
 
             # 从 MongoDB 获取财务数据
             financial_data = adapter.get_financial_data(symbol)
@@ -1852,29 +1868,31 @@ class DataSourceManager:
             return f"❌ 生成{symbol}基本面分析失败: {e}"
 
     def _get_valuation_indicators(self, symbol: str) -> Dict:
-        """从stock_basic_info集合获取估值指标"""
+        """从 stock_basic_info 表获取估值指标（PG 版本）"""
         try:
-            db_manager = get_database_manager()
-            if not db_manager.is_mongodb_available():
-                return {}
-                
-            client = db_manager.get_mongodb_client()
-            db = client[db_manager.config.mongodb_config.database_name]
-            
-            # 从stock_basic_info集合获取估值指标
-            collection = db['stock_basic_info']
-            result = collection.find_one({'ts_code': symbol})
-            
-            if result:
-                return {
-                    'pe': result.get('pe'),
-                    'pb': result.get('pb'),
-                    'pe_ttm': result.get('pe_ttm'),
-                    'total_mv': result.get('total_mv'),
-                    'circ_mv': result.get('circ_mv')
-                }
+            from app.core.database import sync_session_factory
+            from app.core.pg_models import StockBasicInfo
+            from sqlalchemy import select
+
+            session = sync_session_factory()
+            try:
+                code6 = str(symbol).zfill(6)
+                stmt = select(StockBasicInfo).where(StockBasicInfo.code == code6)
+                result = session.execute(stmt)
+                row = result.scalars().first()
+
+                if row:
+                    return {
+                        'pe': row.pe,
+                        'pb': row.pb,
+                        'pe_ttm': row.pe_ttm,
+                        'total_mv': row.total_mv,
+                        'circ_mv': row.circ_mv
+                    }
+            finally:
+                session.close()
             return {}
-            
+
         except Exception as e:
             logger.error(f"获取{symbol}估值指标失败: {e}")
             return {}
@@ -2050,11 +2068,11 @@ class DataSourceManager:
         logger.warning(f"⚠️ [数据来源: 生成分析] 所有数据源失败，生成基本分析: {symbol}")
         return self._generate_fundamentals_analysis(symbol)
 
-    def _get_mongodb_news(self, symbol: str, hours_back: int, limit: int) -> List[Dict[str, Any]]:
+    def _get_pg_cache_news(self, symbol: str, hours_back: int, limit: int) -> List[Dict[str, Any]]:
         """从MongoDB获取新闻数据"""
         try:
-            from tradingagents.dataflows.cache.mongodb_cache_adapter import get_mongodb_cache_adapter
-            adapter = get_mongodb_cache_adapter()
+            from tradingagents.dataflows.cache.pg_cache_adapter import get_pg_cache_adapter
+            adapter = get_pg_cache_adapter()
 
             # 从MongoDB获取新闻数据
             news_data = adapter.get_news_data(symbol, hours_back=hours_back, limit=limit)
@@ -2228,7 +2246,7 @@ class USDataSourceManager:
     def __init__(self):
         """初始化美股数据源管理器"""
         # 检查是否启用 MongoDB 缓存
-        self.use_mongodb_cache = self._check_mongodb_enabled()
+        self.use_pg_cache = self._check_pg_enabled()
 
         # 检查可用的数据源
         self.available_sources = self._check_available_sources()
@@ -2238,11 +2256,11 @@ class USDataSourceManager:
         self.current_source = self.default_source
 
         logger.info(f"📊 美股数据源管理器初始化完成")
-        logger.info(f"   MongoDB缓存: {'✅ 已启用' if self.use_mongodb_cache else '❌ 未启用'}")
+        logger.info(f"   MongoDB缓存: {'✅ 已启用' if self.use_pg_cache else '❌ 未启用'}")
         logger.info(f"   默认数据源: {self.default_source.value}")
         logger.info(f"   可用数据源: {[s.value for s in self.available_sources]}")
 
-    def _check_mongodb_enabled(self) -> bool:
+    def _check_pg_enabled(self) -> bool:
         """检查是否启用MongoDB缓存"""
         from tradingagents.config.runtime_settings import use_app_cache_enabled
         return use_app_cache_enabled()
@@ -2259,38 +2277,40 @@ class USDataSourceManager:
         """
         try:
             # 从数据库读取数据源配置
-            from app.core.database import get_mongo_db_sync
-            db = get_mongo_db_sync()
+            from app.core.database import sync_session_factory
+            from app.core.pg_models import DataSourceGrouping
+            from sqlalchemy import select as _select, desc as _desc
 
-            # 方法1: 从 datasource_groupings 集合读取（推荐）
-            groupings_collection = db.datasource_groupings
-            groupings = list(groupings_collection.find({
-                "market_category_id": "us_stocks",
-                "enabled": True
-            }).sort("priority", -1))  # 降序排序，优先级高的在前
+            _session = sync_session_factory()
+            try:
+                stmt = _select(DataSourceGrouping).where(
+                    DataSourceGrouping.is_active == True
+                )
+                result = _session.execute(stmt)
+                groupings = result.scalars().all()
 
-            if groupings:
-                # 转换为 USDataSource 枚举
-                # 🔥 数据源名称映射（数据库名称 → USDataSource 枚举）
-                source_mapping = {
-                    'yfinance': USDataSource.YFINANCE,
-                    'yahoo_finance': USDataSource.YFINANCE,  # 别名
-                    'alpha_vantage': USDataSource.ALPHA_VANTAGE,
-                    'finnhub': USDataSource.FINNHUB,
-                }
+                if groupings:
+                    source_mapping = {
+                        'yfinance': USDataSource.YFINANCE,
+                        'yahoo_finance': USDataSource.YFINANCE,
+                        'alpha_vantage': USDataSource.ALPHA_VANTAGE,
+                        'finnhub': USDataSource.FINNHUB,
+                    }
 
-                result = []
-                for grouping in groupings:
-                    ds_name = grouping.get('data_source_name', '').lower()
-                    if ds_name in source_mapping:
-                        source = source_mapping[ds_name]
-                        # 排除 MongoDB（MongoDB 是最高优先级，不参与降级）
-                        if source != USDataSource.MONGODB and source in self.available_sources:
-                            result.append(source)
+                    result_list = []
+                    for grouping in groupings:
+                        ds_name = grouping.name.lower() if grouping.name else ''
+                        if ds_name in source_mapping:
+                            source = source_mapping[ds_name]
+                            if source != USDataSource.MONGODB and source in self.available_sources:
+                                result_list.append(source)
 
-                if result:
-                    logger.info(f"✅ [美股数据源优先级] 从数据库读取: {[s.value for s in result]}")
-                    return result
+                    if result_list:
+                        logger.info(f"✅ [美股数据源优先级] 从数据库读取: {[s.value for s in result_list]}")
+                        _session.close()
+                        return result_list
+            finally:
+                _session.close()
 
             logger.warning("⚠️ [美股数据源优先级] 数据库中没有配置，使用默认顺序")
         except Exception as e:
@@ -2309,7 +2329,7 @@ class USDataSourceManager:
     def _get_default_source(self) -> USDataSource:
         """获取默认数据源"""
         # 如果启用MongoDB缓存，MongoDB作为最高优先级数据源
-        if self.use_mongodb_cache:
+        if self.use_pg_cache:
             return USDataSource.MONGODB
 
         # 从环境变量获取，默认使用 yfinance
@@ -2333,7 +2353,7 @@ class USDataSourceManager:
         available = []
 
         # MongoDB 缓存
-        if self.use_mongodb_cache:
+        if self.use_pg_cache:
             available.append(USDataSource.MONGODB)
             logger.info("✅ MongoDB缓存数据源可用")
 
@@ -2389,31 +2409,32 @@ class USDataSourceManager:
     def _get_enabled_sources_from_db(self) -> List[str]:
         """从数据库读取启用的数据源列表"""
         try:
-            from app.core.database import get_mongo_db_sync
-            db = get_mongo_db_sync()
+            from app.core.database import sync_session_factory
+            from app.core.pg_models import DataSourceGrouping
+            from sqlalchemy import select as _select, desc as _desc
 
-            # 从 datasource_groupings 集合读取
-            groupings = list(db.datasource_groupings.find({
-                "market_category_id": "us_stocks",
-                "enabled": True
-            }))
+            _session = sync_session_factory()
+            try:
+                stmt = _select(DataSourceGrouping).where(DataSourceGrouping.is_active == True)
+                res = _session.execute(stmt)
+                groupings = res.scalars().all()
 
-            # 🔥 数据源名称映射（数据库名称 → 代码中使用的名称）
-            name_mapping = {
-                'alpha vantage': 'alpha_vantage',
-                'yahoo finance': 'yfinance',
-                'finnhub': 'finnhub',
-            }
+                name_mapping = {
+                    'alpha vantage': 'alpha_vantage',
+                    'yahoo finance': 'yfinance',
+                    'finnhub': 'finnhub',
+                }
 
-            result = []
-            for g in groupings:
-                db_name = g.get('data_source_name', '').lower()
-                # 使用映射表转换名称
-                code_name = name_mapping.get(db_name, db_name)
-                result.append(code_name)
-                logger.debug(f"🔄 数据源名称映射: '{db_name}' → '{code_name}'")
+                result = []
+                for g in groupings:
+                    db_name = g.name.lower() if g.name else ''
+                    code_name = name_mapping.get(db_name, db_name)
+                    result.append(code_name)
+                    logger.debug(f"🔄 数据源名称映射: '{db_name}' → '{code_name}'")
 
-            return result
+                return result
+            finally:
+                _session.close()
         except Exception as e:
             logger.warning(f"⚠️ 从数据库读取启用的数据源失败: {e}")
             # 默认全部启用
@@ -2422,16 +2443,20 @@ class USDataSourceManager:
     def _get_datasource_configs_from_db(self) -> dict:
         """从数据库读取数据源配置（包括 API Key）"""
         try:
-            from app.core.database import get_mongo_db_sync
-            db = get_mongo_db_sync()
+            from app.core.database import sync_session_factory
+            from app.core.pg_models import SystemConfig
+            from sqlalchemy import select as _select, desc as _desc
+            _session = sync_session_factory()
 
             # 从 system_configs 集合读取激活的配置
-            config = db.system_configs.find_one({"is_active": True})
+            stmt = _select(SystemConfig).where(SystemConfig.is_active == True).order_by(_desc(SystemConfig.version)).limit(1)
+            result = _session.execute(stmt)
+            config = result.scalars().first()
             if not config:
                 return {}
 
             # 提取数据源配置
-            datasource_configs = config.get('data_source_configs', [])
+            datasource_configs = config.data_source_configs or []
 
             # 构建配置字典 {数据源名称: {api_key, api_secret, ...}}
             result = {}

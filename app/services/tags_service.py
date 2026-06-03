@@ -4,94 +4,90 @@
 from __future__ import annotations
 from typing import List, Optional, Dict, Any
 from datetime import datetime
-from bson import ObjectId
 
-from app.core.database import get_mongo_db
+from sqlalchemy import select, update, delete
+
+from app.core.database import async_session_factory
+from app.core.pg_models import StockTag
 
 
 class TagsService:
     def __init__(self) -> None:
-        self.db = None
-        self._indexes_ensured = False
+        pass
 
-    async def _get_db(self):
-        if self.db is None:
-            self.db = get_mongo_db()
-        return self.db
-
-    async def ensure_indexes(self) -> None:
-        if self._indexes_ensured:
-            return
-        db = await self._get_db()
-        # 每个用户的标签名唯一
-        await db.user_tags.create_index([("user_id", 1), ("name", 1)], unique=True, name="uniq_user_tag_name")
-        await db.user_tags.create_index([("user_id", 1), ("sort_order", 1)], name="idx_user_tag_sort")
-        self._indexes_ensured = True
-
-    def _normalize_user_id(self, user_id: str) -> str:
-        # 统一为字符串存储，便于兼容开源版(admin)与未来ObjectId
-        return str(user_id)
-
-    def _format_doc(self, doc: Dict[str, Any]) -> Dict[str, Any]:
+    def _format_doc(self, doc: StockTag) -> Dict[str, Any]:
         return {
-            "id": str(doc.get("_id")),
-            "name": doc.get("name"),
-            "color": doc.get("color") or "#409EFF",
-            "sort_order": doc.get("sort_order", 0),
-            "created_at": (doc.get("created_at") or datetime.utcnow()).isoformat(),
-            "updated_at": (doc.get("updated_at") or datetime.utcnow()).isoformat(),
+            "id": str(doc.id),
+            "name": doc.tag_name,
+            "color": "#409EFF",
+            "sort_order": 0,
+            "created_at": doc.created_at.isoformat() if doc.created_at else datetime.utcnow().isoformat(),
+            "updated_at": doc.created_at.isoformat() if doc.created_at else datetime.utcnow().isoformat(),
         }
 
     async def list_tags(self, user_id: str) -> List[Dict[str, Any]]:
-        db = await self._get_db()
-        await self.ensure_indexes()
-        cursor = db.user_tags.find({"user_id": self._normalize_user_id(user_id)}).sort([
-            ("sort_order", 1), ("name", 1)
-        ])
-        docs = await cursor.to_list(length=None)
-        return [self._format_doc(d) for d in docs]
+        async with async_session_factory() as session:
+            result = await session.execute(
+                select(StockTag).where(StockTag.user_id == int(user_id)).order_by(
+                    StockTag.tag_name
+                )
+            )
+            docs = result.scalars().all()
+            tags_map: Dict[str, Dict[str, Any]] = {}
+            for d in docs:
+                # 去重：同名标签只返回一条
+                if d.tag_name not in tags_map:
+                    tags_map[d.tag_name] = self._format_doc(d)
+            return list(tags_map.values())
 
     async def create_tag(self, user_id: str, name: str, color: Optional[str] = None, sort_order: int = 0) -> Dict[str, Any]:
-        db = await self._get_db()
-        await self.ensure_indexes()
         now = datetime.utcnow()
-        doc = {
-            "user_id": self._normalize_user_id(user_id),
-            "name": name.strip(),
-            "color": color or "#409EFF",
-            "sort_order": int(sort_order or 0),
-            "created_at": now,
-            "updated_at": now,
-        }
-        result = await db.user_tags.insert_one(doc)
-        doc["_id"] = result.inserted_id
-        return self._format_doc(doc)
+        async with async_session_factory() as session:
+            # 检查是否已存在
+            existing = await session.execute(
+                select(StockTag).where(
+                    StockTag.user_id == int(user_id),
+                    StockTag.tag_name == name.strip()
+                ).limit(1)
+            )
+            if existing.scalar_one_or_none():
+                # 已存在，返回已有记录
+                return self._format_doc(existing.scalar_one_or_none())
+
+            tag = StockTag(
+                user_id=int(user_id),
+                stock_code="__tag__",  # 通用标签用占位符
+                tag_name=name.strip(),
+                created_at=now,
+            )
+            session.add(tag)
+            await session.commit()
+            await session.refresh(tag)
+            return self._format_doc(tag)
 
     async def update_tag(self, user_id: str, tag_id: str, *, name: Optional[str] = None, color: Optional[str] = None, sort_order: Optional[int] = None) -> bool:
-        db = await self._get_db()
-        await self.ensure_indexes()
-        update: Dict[str, Any] = {"updated_at": datetime.utcnow()}
-        if name is not None:
-            update["name"] = name.strip()
-        if color is not None:
-            update["color"] = color
-        if sort_order is not None:
-            update["sort_order"] = int(sort_order)
-        if len(update) == 1:  # 只有updated_at
-            return True
-        result = await db.user_tags.update_one(
-            {"_id": ObjectId(tag_id), "user_id": self._normalize_user_id(user_id)},
-            {"$set": update}
-        )
-        return result.matched_count > 0
+        if name is None:
+            return True  # 不需要更新
+        async with async_session_factory() as session:
+            stmt = (
+                update(StockTag)
+                .where(StockTag.id == int(tag_id), StockTag.user_id == int(user_id))
+                .values(tag_name=name.strip())
+            )
+            result = await session.execute(stmt)
+            await session.commit()
+            return result.rowcount > 0
 
     async def delete_tag(self, user_id: str, tag_id: str) -> bool:
-        db = await self._get_db()
-        await self.ensure_indexes()
-        result = await db.user_tags.delete_one({"_id": ObjectId(tag_id), "user_id": self._normalize_user_id(user_id)})
-        return result.deleted_count > 0
+        async with async_session_factory() as session:
+            stmt = delete(StockTag).where(
+                StockTag.id == int(tag_id),
+                StockTag.user_id == int(user_id)
+            )
+            result = await session.execute(stmt)
+            await session.commit()
+            return result.rowcount > 0
 
 
 # 全局实例
 tags_service = TagsService()
-

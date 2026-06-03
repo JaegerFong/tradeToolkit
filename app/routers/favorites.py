@@ -217,7 +217,7 @@ async def get_user_tags(
 
 class SyncFavoritesRequest(BaseModel):
     """同步自选股实时行情请求"""
-    data_source: str = "tushare"  # tushare/akshare
+    data_source: str = "akshare"
 
 
 @router.post("/sync-realtime", response_model=dict)
@@ -252,10 +252,7 @@ async def sync_favorites_realtime(
         logger.info(f"🎯 需要同步的股票: {len(symbols)} 只 - {symbols}")
 
         # 根据数据源选择同步服务
-        if request.data_source == "tushare":
-            from app.worker.tushare_sync_service import get_tushare_sync_service
-            service = await get_tushare_sync_service()
-        elif request.data_source == "akshare":
+        if request.data_source == "akshare":
             from app.worker.akshare_sync_service import get_akshare_sync_service
             service = await get_akshare_sync_service()
         else:

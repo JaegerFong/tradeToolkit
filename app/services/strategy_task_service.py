@@ -8,19 +8,29 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from app.core.database import get_mongo_db
-from app.models.strategy import (
+from sqlalchemy import select, func, delete, update as sql_update
+from sqlalchemy.dialects.postgresql import insert
+
+from app.core.database import async_session_factory
+from app.core.pg_models import (
+    StrategyDefinition,
+    StrategyRun,
+    StrategyPool,
     StrategyBacktest,
+    StockBasicInfo,
+)
+from app.models.strategy import (
+    StrategyBacktest as StrategyBacktestModel,
     StrategyBacktestCreateRequest,
     StrategyBacktestMetrics,
     StrategyBacktestResponse,
     StrategyCreateRequest,
-    StrategyDefinition,
+    StrategyDefinition as StrategyDefinitionModel,
     StrategyDetail,
     StrategyParseResult,
     StrategyPoolItem,
     StrategyPoolStatus,
-    StrategyRun,
+    StrategyRun as StrategyRunModel,
     StrategyRunEvent,
     StrategyRunResponse,
     StrategyRunResult,
@@ -39,41 +49,19 @@ logger = logging.getLogger("webapi")
 
 
 class StrategyTaskService:
-    STRATEGIES = "strategy_definitions"
-    RUNS = "strategy_runs"
-    EVENTS = "strategy_run_events"
-    RESULTS = "strategy_run_results"
-    POOL = "strategy_stock_pool"
-    BACKTESTS = "strategy_backtests"
-    BACKTEST_RESULTS = "strategy_backtest_results"
-
     def __init__(self) -> None:
         self.parser = get_strategy_markdown_parser()
         self.engine = get_strong_trend_rule_engine()
         self.narrative = get_strategy_narrative_service()
-        self._indexes_ready = False
-
-    async def ensure_indexes(self) -> None:
-        if self._indexes_ready:
-            return
-        db = get_mongo_db()
-        await db[self.STRATEGIES].create_index([("user_id", 1), ("strategy_id", 1)], unique=True)
-        await db[self.RUNS].create_index([("user_id", 1), ("strategy_id", 1), ("run_id", 1)], unique=True)
-        await db[self.EVENTS].create_index([("strategy_id", 1), ("run_id", 1), ("timestamp", 1)])
-        await db[self.RESULTS].create_index([("strategy_id", 1), ("run_id", 1), ("total_score", -1)])
-        await db[self.POOL].create_index([("user_id", 1), ("strategy_id", 1), ("code", 1)], unique=True)
-        await db[self.BACKTESTS].create_index([("user_id", 1), ("strategy_id", 1), ("backtest_id", 1)], unique=True)
-        await db[self.BACKTEST_RESULTS].create_index([("strategy_id", 1), ("backtest_id", 1), ("date", 1)])
-        self._indexes_ready = True
 
     async def create_strategy(self, user_id: str, req: StrategyCreateRequest) -> StrategyDetail:
-        await self.ensure_indexes()
         parse = self.parser.parse(req.markdown)
         strategy_id = f"st_{now_tz().strftime('%Y%m%d')}_{uuid.uuid4().hex[:10]}"
         schedule = req.schedule.model_copy()
         if req.enabled:
             schedule.enabled = True
-        doc = StrategyDefinition(
+
+        doc = StrategyDefinitionModel(
             strategy_id=strategy_id,
             user_id=str(user_id),
             name=req.name,
@@ -82,68 +70,135 @@ class StrategyTaskService:
             schedule=schedule,
             parse_result=parse,
         )
-        db = get_mongo_db()
-        await db[self.STRATEGIES].insert_one(doc.model_dump(by_alias=True))
+
+        async with async_session_factory() as session:
+            sd = StrategyDefinition(
+                name=req.name,
+                status=StrategyStatus.ENABLED.value if req.enabled else StrategyStatus.DRAFT.value,
+                config={
+                    "strategy_id": strategy_id,
+                    "user_id": str(user_id),
+                    "markdown": req.markdown,
+                    "schedule": schedule.model_dump(),
+                    "parse_result": parse.model_dump(),
+                },
+                created_at=now_tz().replace(tzinfo=None),
+                updated_at=now_tz().replace(tzinfo=None),
+            )
+            session.add(sd)
+            await session.commit()
+            await session.refresh(sd)
+
         return self._to_detail(doc)
 
     async def list_strategies(self, user_id: str) -> List[StrategySummary]:
-        await self.ensure_indexes()
-        db = get_mongo_db()
-        cursor = db[self.STRATEGIES].find({"user_id": str(user_id)}).sort("updated_at", -1)
-        items: List[StrategySummary] = []
-        async for doc in cursor:
-            items.append(self._to_summary(StrategyDefinition.model_validate(doc)))
-        return items
+        async with async_session_factory() as session:
+            result = await session.execute(
+                select(StrategyDefinition).order_by(StrategyDefinition.updated_at.desc())
+            )
+            docs = result.scalars().all()
+            items: List[StrategySummary] = []
+            for doc in docs:
+                config = doc.config or {}
+                items.append(StrategySummary(
+                    strategy_id=config.get("strategy_id", str(doc.id)),
+                    name=doc.name,
+                    version=config.get("version", 1),
+                    status=StrategyStatus(doc.status),
+                    schedule=None,
+                    validation_status="ok",
+                    errors=[],
+                    warnings=[],
+                    created_at=doc.created_at,
+                    updated_at=doc.updated_at,
+                ))
+            return items
 
     async def get_strategy(self, strategy_id: str, user_id: str) -> Optional[StrategyDetail]:
-        doc = await get_mongo_db()[self.STRATEGIES].find_one({"strategy_id": strategy_id, "user_id": str(user_id)})
-        return self._to_detail(StrategyDefinition.model_validate(doc)) if doc else None
+        async with async_session_factory() as session:
+            # Search in config JSONB for matching strategy_id
+            result = await session.execute(
+                select(StrategyDefinition).where(
+                    StrategyDefinition.config['strategy_id'].as_string() == strategy_id
+                ).limit(1)
+            )
+            doc = result.scalar_one_or_none()
+            if not doc:
+                return None
+            config = doc.config or {}
+            strategy = StrategyDefinitionModel(
+                strategy_id=config.get("strategy_id", str(doc.id)),
+                user_id=str(user_id),
+                name=doc.name,
+                markdown=config.get("markdown", ""),
+                status=StrategyStatus(doc.status),
+                schedule=None,
+                parse_result=StrategyParseResult.model_validate(config.get("parse_result", {})),
+            )
+            return self._to_detail(strategy)
 
     async def update_strategy(self, strategy_id: str, user_id: str, req: StrategyUpdateRequest) -> Optional[StrategyDetail]:
-        db = get_mongo_db()
-        doc = await db[self.STRATEGIES].find_one({"strategy_id": strategy_id, "user_id": str(user_id)})
-        if not doc:
-            return None
-        current = StrategyDefinition.model_validate(doc)
-        markdown = req.markdown if req.markdown is not None else current.markdown
-        parse = self.parser.parse(markdown)
-        update: Dict[str, Any] = {
-            "updated_at": now_tz(),
-            "parse_result": parse.model_dump(),
-        }
-        if req.name is not None:
-            update["name"] = req.name
-        if req.markdown is not None:
-            update["markdown"] = req.markdown
-            update["version"] = current.version + 1
-        if req.enabled is not None:
-            update["status"] = StrategyStatus.ENABLED.value if req.enabled else StrategyStatus.DISABLED.value
-            if req.schedule is None:
-                schedule = current.schedule.model_copy()
-                schedule.enabled = bool(req.enabled)
-                update["schedule"] = schedule.model_dump()
-        if req.schedule is not None:
-            update["schedule"] = req.schedule.model_dump()
-        await db[self.STRATEGIES].update_one({"strategy_id": strategy_id, "user_id": str(user_id)}, {"$set": update})
+        async with async_session_factory() as session:
+            result = await session.execute(
+                select(StrategyDefinition).where(
+                    StrategyDefinition.config['strategy_id'].as_string() == strategy_id
+                ).limit(1)
+            )
+            doc = result.scalar_one_or_none()
+            if not doc:
+                return None
+
+            config = dict(doc.config or {})
+            markdown = req.markdown if req.markdown is not None else config.get("markdown", "")
+            parse = self.parser.parse(markdown)
+            config["markdown"] = markdown
+            config["parse_result"] = parse.model_dump()
+            if req.name is not None:
+                doc.name = req.name
+            if req.markdown is not None:
+                config["version"] = config.get("version", 1) + 1
+            if req.enabled is not None:
+                doc.status = StrategyStatus.ENABLED.value if req.enabled else StrategyStatus.DISABLED.value
+            if req.schedule is not None:
+                config["schedule"] = req.schedule.model_dump()
+
+            doc.config = config
+            doc.updated_at = now_tz().replace(tzinfo=None)
+            await session.commit()
+
         return await self.get_strategy(strategy_id, user_id)
 
     async def validate_strategy(self, strategy_id: str, user_id: str) -> Optional[StrategyParseResult]:
-        doc = await get_mongo_db()[self.STRATEGIES].find_one({"strategy_id": strategy_id, "user_id": str(user_id)})
-        if not doc:
-            return None
-        return self.parser.parse(str(doc.get("markdown") or ""))
+        async with async_session_factory() as session:
+            result = await session.execute(
+                select(StrategyDefinition).where(
+                    StrategyDefinition.config['strategy_id'].as_string() == strategy_id
+                ).limit(1)
+            )
+            doc = result.scalar_one_or_none()
+            if not doc:
+                return None
+            config = doc.config or {}
+            return self.parser.parse(str(config.get("markdown") or ""))
 
     async def create_run(self, strategy_id: str, user_id: str, run_type: str = "manual", as_of_date: Optional[str] = None) -> Optional[StrategyRunResponse]:
-        await self.ensure_indexes()
-        db = get_mongo_db()
-        strategy = await self._load_strategy(strategy_id, user_id)
+        strategy = await self._load_strategy_model(strategy_id, user_id)
         if not strategy:
             return None
-        running = await db[self.RUNS].find_one({"strategy_id": strategy_id, "status": {"$in": ["queued", "running"]}})
-        if running:
-            return self._to_run_response(StrategyRun.model_validate(running))
+
+        # Check for existing running run
+        async with async_session_factory() as session:
+            running = await session.execute(
+                select(StrategyRun).where(
+                    StrategyRun.result['strategy_id'].as_string() == strategy_id,
+                    StrategyRun.status.in_(["queued", "running"]),
+                ).limit(1)
+            )
+            if running.scalar_one_or_none():
+                return None
+
         run_id = f"sr_{now_tz().strftime('%Y%m%d')}_{uuid.uuid4().hex[:10]}"
-        run = StrategyRun(
+        run = StrategyRunModel(
             run_id=run_id,
             strategy_id=strategy_id,
             user_id=str(user_id),
@@ -151,76 +206,135 @@ class StrategyTaskService:
             run_type="scheduled" if run_type == "scheduled" else "manual",
             as_of_date=as_of_date,
         )
-        await db[self.RUNS].insert_one(run.model_dump(by_alias=True))
+
+        async with async_session_factory() as session:
+            sr = StrategyRun(
+                status="queued",
+                result={
+                    "strategy_id": strategy_id,
+                    "run_id": run_id,
+                    "user_id": str(user_id),
+                    "run_type": run_type,
+                    "as_of_date": as_of_date,
+                },
+                started_at=now_tz().replace(tzinfo=None),
+                created_at=now_tz().replace(tzinfo=None),
+            )
+            session.add(sr)
+            await session.commit()
+
         return self._to_run_response(run)
 
     async def get_run(self, strategy_id: str, run_id: str, user_id: str) -> Optional[StrategyRunResponse]:
-        doc = await get_mongo_db()[self.RUNS].find_one({"strategy_id": strategy_id, "run_id": run_id, "user_id": str(user_id)})
-        return self._to_run_response(StrategyRun.model_validate(doc)) if doc else None
+        async with async_session_factory() as session:
+            result = await session.execute(
+                select(StrategyRun).where(
+                    StrategyRun.result['run_id'].as_string() == run_id,
+                ).limit(1)
+            )
+            doc = result.scalar_one_or_none()
+            if not doc:
+                return None
+            config = doc.result or {}
+            run = StrategyRunModel(
+                run_id=run_id,
+                strategy_id=strategy_id,
+                user_id=str(user_id),
+                run_type=config.get("run_type", "manual"),
+                status=StrategyRunStatus(doc.status),
+                started_at=doc.started_at,
+                progress=None,
+                stats=None,
+                summary=None,
+            )
+            return self._to_run_response(run)
 
     async def list_run_events(self, strategy_id: str, run_id: str, user_id: str, limit: int = 200) -> List[StrategyRunEvent]:
-        db = get_mongo_db()
-        run = await db[self.RUNS].find_one({"strategy_id": strategy_id, "run_id": run_id, "user_id": str(user_id)}, {"_id": 1})
-        if not run:
-            return []
-        cursor = db[self.EVENTS].find({"strategy_id": strategy_id, "run_id": run_id}).sort("timestamp", 1).limit(limit)
-        return [StrategyRunEvent.model_validate(doc) async for doc in cursor]
+        return []
 
     async def list_run_results(self, strategy_id: str, run_id: str, user_id: str, limit: int = 50, offset: int = 0) -> Tuple[int, List[StrategyRunResult]]:
-        db = get_mongo_db()
-        run = await db[self.RUNS].find_one({"strategy_id": strategy_id, "run_id": run_id, "user_id": str(user_id)}, {"_id": 1})
-        if not run:
-            return 0, []
-        total = await db[self.RESULTS].count_documents({"strategy_id": strategy_id, "run_id": run_id})
-        cursor = db[self.RESULTS].find({"strategy_id": strategy_id, "run_id": run_id}, {"_id": 0, "strategy_id": 0, "run_id": 0}).sort("total_score", -1).skip(offset).limit(limit)
-        return total, [StrategyRunResult.model_validate(doc) async for doc in cursor]
+        async with async_session_factory() as session:
+            result = await session.execute(
+                select(StrategyRun).where(
+                    StrategyRun.result['run_id'].as_string() == run_id,
+                ).limit(1)
+            )
+            doc = result.scalar_one_or_none()
+            if not doc:
+                return 0, []
+            config = doc.result or {}
+            signals = config.get("signals", [])
+            return len(signals), [StrategyRunResult.model_validate(s) for s in signals[offset:offset + limit]]
 
     async def list_pool(self, strategy_id: str, user_id: str, status: Optional[str] = None, limit: int = 200, offset: int = 0) -> List[StrategyPoolItem]:
-        query: Dict[str, Any] = {"strategy_id": strategy_id, "user_id": str(user_id)}
-        if status:
-            query["status"] = status
-        cursor = get_mongo_db()[self.POOL].find(query, {"_id": 0, "user_id": 0}).sort("last_score", -1).skip(offset).limit(limit)
-        return [StrategyPoolItem.model_validate(doc) async for doc in cursor]
+        async with async_session_factory() as session:
+            stmt = select(StrategyPool).where(
+                StrategyPool.details['strategy_id'].as_string() == strategy_id
+            )
+            if status:
+                stmt = stmt.where(StrategyPool.status == status)
+            stmt = stmt.order_by(StrategyPool.score.desc()).offset(offset).limit(limit)
+            result = await session.execute(stmt)
+            docs = result.scalars().all()
+            return [
+                StrategyPoolItem(
+                    code=d.stock_code,
+                    name=d.stock_name,
+                    status=StrategyPoolStatus(d.status),
+                    last_signal_date=d.updated_at,
+                    last_score=d.score or 0,
+                    entry_reason=d.reason or "",
+                    evidence={},
+                )
+                for d in docs
+            ]
 
     async def run_task_background(self, strategy_id: str, run_id: str, user_id: str) -> None:
-        db = get_mongo_db()
-        strategy = await self._load_strategy(strategy_id, user_id)
-        run_doc = await db[self.RUNS].find_one({"strategy_id": strategy_id, "run_id": run_id, "user_id": str(user_id)})
-        if not strategy or not run_doc:
+        strategy = await self._load_strategy_model(strategy_id, user_id)
+        if not strategy:
             return
-        run = StrategyRun.model_validate(run_doc)
-        if run.status != StrategyRunStatus.QUEUED:
-            return
+
+        async with async_session_factory() as session:
+            result = await session.execute(
+                select(StrategyRun).where(
+                    StrategyRun.result['run_id'].as_string() == run_id,
+                ).limit(1)
+            )
+            doc = result.scalar_one_or_none()
+            if not doc:
+                return
+            if doc.status != "queued":
+                return
+
+            # Update to running
+            doc.status = "running"
+            doc.started_at = now_tz().replace(tzinfo=None)
+            await session.commit()
+
         stats = StrategyRunStats()
         try:
-            await self._update_run(run_id, strategy_id, user_id, {"status": StrategyRunStatus.RUNNING.value, "started_at": now_tz()})
-            await self._emit_event(run_id, strategy_id, "load_universe", "加载股票池", "正在读取本地A股基础信息", 5)
             symbols = await self._load_universe(strategy.parse_result.config)
-            await db[self.RESULTS].delete_many({"strategy_id": strategy_id, "run_id": run_id})
             if not symbols:
-                message = "本地 stock_basic_info 为空，无法执行策略筛选。请先同步股票基础信息和日线数据。"
-                await self._emit_event(run_id, strategy_id, "data_incomplete", "数据不完整", message, 100, {"collection": "stock_basic_info"})
-                await self._update_run(
-                    run_id,
-                    strategy_id,
-                    user_id,
-                    {
-                        "status": StrategyRunStatus.DATA_INCOMPLETE.value,
-                        "completed_at": now_tz(),
-                        "progress": {"percent": 100, "step": "data_incomplete", "message": message},
-                        "stats": stats.model_dump(),
-                        "summary": message,
-                        "error": message,
-                    },
-                )
+                async with async_session_factory() as session:
+                    result = await session.execute(
+                        select(StrategyRun).where(StrategyRun.result['run_id'].as_string() == run_id).limit(1)
+                    )
+                    run_doc = result.scalar_one_or_none()
+                    if run_doc:
+                        config = dict(run_doc.result or {})
+                        config["status"] = "data_incomplete"
+                        config["error"] = "本地 stock_basic_info 为空"
+                        run_doc.result = config
+                        run_doc.status = "data_incomplete"
+                        run_doc.completed_at = now_tz().replace(tzinfo=None)
+                        await session.commit()
                 return
-            await self._emit_event(run_id, strategy_id, "scan", "执行规则", f"开始扫描{len(symbols)}只股票", 10)
 
             results: List[StrategyRunResult] = []
             for idx, basic in enumerate(symbols, start=1):
                 code = str(basic.get("code") or "")
-                rows = await self._load_daily_rows(code, run.as_of_date)
-                ev = self.engine.evaluate(code, str(basic.get("name") or ""), rows, basic, strategy.parse_result.config, run.as_of_date)
+                rows = await self._load_daily_rows(code, run_id)
+                ev = self.engine.evaluate(code, str(basic.get("name") or ""), rows, basic, strategy.parse_result.config, run_id)
                 stats.total_scanned += 1
                 if ev.passed_initial:
                     stats.initial_candidates += 1
@@ -231,72 +345,144 @@ class StrategyTaskService:
                 if ev.result:
                     results.append(ev.result)
                     stats.selected_count += 1
-                    await db[self.RESULTS].insert_one({"strategy_id": strategy_id, "run_id": run_id, **ev.result.model_dump()})
                     await self._upsert_pool(strategy_id, user_id, ev.result)
-                if idx % 50 == 0 or idx == len(symbols):
-                    pct = min(92, 10 + int(idx / max(len(symbols), 1) * 80))
-                    await self._emit_event(run_id, strategy_id, "scan", "执行规则", f"已扫描{idx}/{len(symbols)}，入选{stats.selected_count}只", pct)
-                    await self._update_run(run_id, strategy_id, user_id, {"progress": {"percent": pct, "step": "scan", "message": f"已扫描{idx}/{len(symbols)}"}, "stats": stats.model_dump()})
 
+                if idx % 50 == 0 or idx == len(symbols):
+                    # Update run with intermediate signals
+                    async with async_session_factory() as session:
+                        result = await session.execute(
+                            select(StrategyRun).where(StrategyRun.result['run_id'].as_string() == run_id).limit(1)
+                        )
+                        run_doc = result.scalar_one_or_none()
+                        if run_doc:
+                            config = dict(run_doc.result or {})
+                            config["signals"] = [r.model_dump() for r in results]
+                            config["stats"] = stats.model_dump()
+                            run_doc.result = config
+                            await session.commit()
+
+            # Finalize
             daily_review = await self.narrative.build_daily_review(results, stats)
             next_day_plan = await self.narrative.build_next_day_plan(results)
             summary = f"扫描{stats.total_scanned}只，初筛{stats.initial_candidates}只，强趋势{stats.trend_confirmed}只，入池{stats.selected_count}只。"
-            await self._emit_event(run_id, strategy_id, "finalize", "完成", summary, 100)
-            await self._update_run(
-                run_id,
-                strategy_id,
-                user_id,
-                {
-                    "status": StrategyRunStatus.COMPLETED.value,
-                    "completed_at": now_tz(),
-                    "progress": {"percent": 100, "step": "finalize", "message": "任务完成"},
-                    "stats": stats.model_dump(),
-                    "summary": summary,
-                    "daily_review": daily_review,
-                    "next_day_plan": next_day_plan,
-                },
-            )
+
+            async with async_session_factory() as session:
+                result = await session.execute(
+                    select(StrategyRun).where(StrategyRun.result['run_id'].as_string() == run_id).limit(1)
+                )
+                run_doc = result.scalar_one_or_none()
+                if run_doc:
+                    config = {
+                        "strategy_id": strategy_id,
+                        "run_id": run_id,
+                        "user_id": str(user_id),
+                        "signals": [r.model_dump() for r in results],
+                        "stats": stats.model_dump(),
+                        "summary": summary,
+                        "daily_review": daily_review,
+                        "next_day_plan": next_day_plan,
+                    }
+                    run_doc.result = config
+                    run_doc.status = "completed"
+                    run_doc.completed_at = now_tz().replace(tzinfo=None)
+                    await session.commit()
+
         except Exception as e:
             logger.error("[strategy] run failed: %s", e, exc_info=True)
-            message = f"{type(e).__name__}: {e}"
-            await self._emit_event(run_id, strategy_id, "error", "任务失败", message, 100)
-            await self._update_run(
-                run_id,
-                strategy_id,
-                user_id,
-                {
-                    "status": StrategyRunStatus.FAILED.value,
-                    "completed_at": now_tz(),
-                    "progress": {"percent": 100, "step": "error", "message": message},
-                    "error": message,
-                },
-            )
+            async with async_session_factory() as session:
+                result = await session.execute(
+                    select(StrategyRun).where(StrategyRun.result['run_id'].as_string() == run_id).limit(1)
+                )
+                run_doc = result.scalar_one_or_none()
+                if run_doc:
+                    config = dict(run_doc.result or {})
+                    config["error"] = str(e)
+                    run_doc.result = config
+                    run_doc.status = "failed"
+                    run_doc.completed_at = now_tz().replace(tzinfo=None)
+                    await session.commit()
 
     async def create_backtest(self, strategy_id: str, user_id: str, req: StrategyBacktestCreateRequest) -> Optional[StrategyBacktestResponse]:
-        await self.ensure_indexes()
-        strategy = await self._load_strategy(strategy_id, user_id)
-        if not strategy:
-            return None
         bt_id = f"sbt_{now_tz().strftime('%Y%m%d')}_{uuid.uuid4().hex[:10]}"
-        bt = StrategyBacktest(backtest_id=bt_id, strategy_id=strategy_id, user_id=str(user_id), strategy_version=strategy.version, request=req)
-        await get_mongo_db()[self.BACKTESTS].insert_one(bt.model_dump(by_alias=True))
-        return self._to_backtest_response(bt)
+        async with async_session_factory() as session:
+            bt = StrategyBacktest(
+                strategy_id=0,
+                status="queued",
+                parameters={
+                    "backtest_id": bt_id,
+                    "strategy_id": strategy_id,
+                    "user_id": str(user_id),
+                    "start_date": req.start_date,
+                    "end_date": req.end_date,
+                    "max_symbols": req.max_symbols,
+                    "holding_days": req.holding_days,
+                },
+                started_at=now_tz().replace(tzinfo=None),
+                created_at=now_tz().replace(tzinfo=None),
+            )
+            session.add(bt)
+            await session.commit()
+            await session.refresh(bt)
+
+        bt_model = StrategyBacktestModel(
+            backtest_id=bt_id,
+            strategy_id=strategy_id,
+            user_id=str(user_id),
+            strategy_version=1,
+            request=req,
+        )
+        bt_model.status = "queued"
+        return self._to_backtest_response(bt_model)
 
     async def get_backtest(self, strategy_id: str, backtest_id: str, user_id: str) -> Optional[StrategyBacktestResponse]:
-        doc = await get_mongo_db()[self.BACKTESTS].find_one({"strategy_id": strategy_id, "backtest_id": backtest_id, "user_id": str(user_id)})
-        return self._to_backtest_response(StrategyBacktest.model_validate(doc)) if doc else None
+        async with async_session_factory() as session:
+            result = await session.execute(
+                select(StrategyBacktest).where(
+                    StrategyBacktest.parameters['backtest_id'].as_string() == backtest_id,
+                ).limit(1)
+            )
+            doc = result.scalar_one_or_none()
+            if not doc:
+                return None
+            params = doc.parameters or {}
+            bt = StrategyBacktestModel(
+                backtest_id=backtest_id,
+                strategy_id=strategy_id,
+                user_id=str(user_id),
+                strategy_version=1,
+                request=StrategyBacktestCreateRequest(**params),
+            )
+            bt.status = doc.status
+            bt.started_at = doc.started_at
+            bt.completed_at = doc.completed_at
+            return self._to_backtest_response(bt)
 
     async def run_backtest_background(self, strategy_id: str, backtest_id: str, user_id: str) -> None:
-        db = get_mongo_db()
-        strategy = await self._load_strategy(strategy_id, user_id)
-        bt_doc = await db[self.BACKTESTS].find_one({"strategy_id": strategy_id, "backtest_id": backtest_id, "user_id": str(user_id)})
-        if not strategy or not bt_doc:
+        strategy = await self._load_strategy_model(strategy_id, user_id)
+        if not strategy:
             return
-        bt = StrategyBacktest.model_validate(bt_doc)
+
+        async with async_session_factory() as session:
+            result = await session.execute(
+                select(StrategyBacktest).where(
+                    StrategyBacktest.parameters['backtest_id'].as_string() == backtest_id,
+                ).limit(1)
+            )
+            doc = result.scalar_one_or_none()
+            if not doc:
+                return
+
+            params = doc.parameters or {}
+            doc.status = "running"
+            doc.started_at = now_tz().replace(tzinfo=None)
+            await session.commit()
+
         try:
-            await db[self.BACKTESTS].update_one({"backtest_id": backtest_id}, {"$set": {"status": "running", "started_at": now_tz()}})
-            symbols = await self._load_universe(strategy.parse_result.config, bt.request.max_symbols)
-            dates = pd.date_range(bt.request.start_date, bt.request.end_date, freq="B")
+            symbols = await self._load_universe(strategy.parse_result.config, params.get("max_symbols"))
+            start_date = params.get("start_date", "2024-01-01")
+            end_date = params.get("end_date", "2024-12-31")
+            holding_days = params.get("holding_days", 5)
+            dates = pd.date_range(start_date, end_date, freq="B")
             signals: List[Dict[str, Any]] = []
             by_type: Dict[str, List[float]] = {}
 
@@ -304,84 +490,152 @@ class StrategyTaskService:
                 as_of = current.date().isoformat()
                 for basic in symbols:
                     code = str(basic.get("code") or "")
-                    rows = await self._load_daily_rows(code, as_of, before_days=220, after_days=bt.request.holding_days + 1)
+                    rows = await self._load_daily_rows(code, backtest_id, before_days=220, after_days=holding_days + 1)
                     ev = self.engine.evaluate(code, str(basic.get("name") or ""), rows, basic, strategy.parse_result.config, as_of)
                     if not ev.result or not ev.result.buy_signals:
                         continue
-                    ret = self._forward_return(rows, as_of, bt.request.holding_days)
+                    ret = self._forward_return(rows, as_of, holding_days)
                     if ret is None:
                         continue
                     signal_type = ev.result.buy_signals[0].signal_type
                     signals.append({"date": as_of, "code": ev.result.code, "name": ev.result.name, "signal_type": signal_type, "return": ret, "score": ev.result.total_score})
                     by_type.setdefault(signal_type, []).append(ret)
-                if d_idx % 5 == 0 or d_idx == len(dates):
-                    pct = min(95, int(d_idx / max(len(dates), 1) * 95))
-                    await db[self.BACKTESTS].update_one({"backtest_id": backtest_id}, {"$set": {"progress": {"percent": pct, "step": "replay", "message": f"回放至{as_of}"}}})
 
-            await db[self.BACKTEST_RESULTS].delete_many({"strategy_id": strategy_id, "backtest_id": backtest_id})
-            if signals:
-                await db[self.BACKTEST_RESULTS].insert_many([{"strategy_id": strategy_id, "backtest_id": backtest_id, **s} for s in signals])
             returns = [float(s["return"]) for s in signals]
             metrics = self._build_backtest_metrics(returns, by_type)
             summary = f"回测完成：共产生{metrics.total_signals}个买点信号，胜率{metrics.win_rate:.2%}，平均收益{metrics.avg_return:.2%}。"
-            await db[self.BACKTESTS].update_one(
-                {"backtest_id": backtest_id},
-                {"$set": {"status": "completed", "completed_at": now_tz(), "progress": {"percent": 100, "step": "finalize", "message": "回测完成"}, "metrics": metrics.model_dump(), "summary": summary}},
-            )
+
+            async with async_session_factory() as session:
+                result = await session.execute(
+                    select(StrategyBacktest).where(
+                        StrategyBacktest.parameters['backtest_id'].as_string() == backtest_id,
+                    ).limit(1)
+                )
+                bt_doc = result.scalar_one_or_none()
+                if bt_doc:
+                    config = dict(bt_doc.parameters or {})
+                    config["signals"] = signals
+                    config["metrics"] = metrics.model_dump()
+                    config["summary"] = summary
+                    bt_doc.parameters = config
+                    bt_doc.result = {"signals": signals, "metrics": metrics.model_dump()}
+                    bt_doc.status = "completed"
+                    bt_doc.completed_at = now_tz().replace(tzinfo=None)
+                    await session.commit()
+
         except Exception as e:
             logger.error("[strategy] backtest failed: %s", e, exc_info=True)
-            await db[self.BACKTESTS].update_one({"backtest_id": backtest_id}, {"$set": {"status": "failed", "completed_at": now_tz(), "error": str(e)}})
+            async with async_session_factory() as session:
+                result = await session.execute(
+                    select(StrategyBacktest).where(
+                        StrategyBacktest.parameters['backtest_id'].as_string() == backtest_id,
+                    ).limit(1)
+                )
+                bt_doc = result.scalar_one_or_none()
+                if bt_doc:
+                    config = dict(bt_doc.parameters or {})
+                    config["error"] = str(e)
+                    bt_doc.parameters = config
+                    bt_doc.status = "failed"
+                    bt_doc.completed_at = now_tz().replace(tzinfo=None)
+                    await session.commit()
 
-    async def _load_strategy(self, strategy_id: str, user_id: str) -> Optional[StrategyDefinition]:
-        doc = await get_mongo_db()[self.STRATEGIES].find_one({"strategy_id": strategy_id, "user_id": str(user_id)})
-        return StrategyDefinition.model_validate(doc) if doc else None
+    async def _load_strategy_model(self, strategy_id: str, user_id: str) -> Optional[StrategyDefinitionModel]:
+        async with async_session_factory() as session:
+            result = await session.execute(
+                select(StrategyDefinition).where(
+                    StrategyDefinition.config['strategy_id'].as_string() == strategy_id
+                ).limit(1)
+            )
+            doc = result.scalar_one_or_none()
+            if not doc:
+                return None
+            config = doc.config or {}
+            return StrategyDefinitionModel(
+                strategy_id=config.get("strategy_id", str(doc.id)),
+                user_id=str(user_id),
+                name=doc.name,
+                markdown=config.get("markdown", ""),
+                status=StrategyStatus(doc.status),
+                schedule=None,
+                parse_result=StrategyParseResult.model_validate(config.get("parse_result", {})),
+            )
 
     async def _load_universe(self, config: Any, limit: Optional[int] = None) -> List[Dict[str, Any]]:
-        cursor = get_mongo_db()["stock_basic_info"].find({}, {"_id": 0, "code": 1, "name": 1, "list_date": 1, "listing_date": 1, "industry": 1, "total_mv": 1, "market_cap": 1}).sort("code", 1)
-        items: List[Dict[str, Any]] = []
-        async for doc in cursor:
-            code = str(doc.get("code") or "")
-            if len(code) == 6 and code.isdigit():
-                items.append(doc)
-                if limit and len(items) >= limit:
-                    break
-        return items
+        async with async_session_factory() as session:
+            stmt = select(
+                StockBasicInfo.code, StockBasicInfo.name,
+                StockBasicInfo.total_mv
+            ).order_by(StockBasicInfo.code)
+            if limit:
+                stmt = stmt.limit(limit)
+            result = await session.execute(stmt)
+            return [
+                {"code": row[0], "name": row[1], "total_mv": row[2]}
+                for row in result.all()
+                if row[0] and len(str(row[0])) == 6 and str(row[0]).isdigit()
+            ]
 
     async def _load_daily_rows(self, code: str, as_of_date: Optional[str], before_days: int = 260, after_days: int = 0) -> List[Dict[str, Any]]:
-        end = pd.to_datetime(as_of_date).date() if as_of_date else now_tz().date()
+        from app.core.pg_models import DailyData
+        end = pd.to_datetime(as_of_date).date() if as_of_date else datetime.utcnow().date()
         start = end - timedelta(days=before_days * 2)
         final = end + timedelta(days=after_days * 2)
-        cursor = (
-            get_mongo_db()["stock_daily_quotes"]
-            .find({"symbol": code, "period": "daily", "trade_date": {"$gte": datetime.combine(start, datetime.min.time()), "$lte": datetime.combine(final, datetime.max.time())}}, {"_id": 0, "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1, "trade_date": 1})
-            .sort("trade_date", 1)
-        )
-        return [doc async for doc in cursor]
+
+        async with async_session_factory() as session:
+            result = await session.execute(
+                select(
+                    DailyData.date, DailyData.open, DailyData.high,
+                    DailyData.low, DailyData.close, DailyData.volume,
+                )
+                .where(
+                    DailyData.code == code,
+                    DailyData.date >= start,
+                    DailyData.date <= final,
+                )
+                .order_by(DailyData.date.asc())
+            )
+            return [
+                {
+                    "trade_date": row[0], "open": row[1], "high": row[2],
+                    "low": row[3], "close": row[4], "volume": row[5],
+                }
+                for row in result.all()
+            ]
 
     async def _upsert_pool(self, strategy_id: str, user_id: str, result: StrategyRunResult) -> None:
-        db = get_mongo_db()
-        now = now_tz()
-        existing = await db[self.POOL].find_one({"strategy_id": strategy_id, "user_id": str(user_id), "code": result.code})
-        update = {
-            "name": result.name,
-            "status": result.status.value,
-            "last_signal_date": result.signal_date,
-            "last_score": result.total_score,
-            "entry_reason": result.entry_reason,
-            "evidence": result.evidence,
-        }
-        if existing:
-            update["tracking_days"] = int(existing.get("tracking_days") or 0) + 1
-            await db[self.POOL].update_one({"_id": existing["_id"]}, {"$set": update})
-        else:
-            await db[self.POOL].insert_one({"strategy_id": strategy_id, "user_id": str(user_id), "code": result.code, "entered_at": now, "entry_date": result.signal_date, "tracking_days": 1, **update})
+        now = now_tz().replace(tzinfo=None)
+        async with async_session_factory() as session:
+            existing_result = await session.execute(
+                select(StrategyPool).where(
+                    StrategyPool.details['strategy_id'].as_string() == strategy_id,
+                    StrategyPool.stock_code == result.code,
+                ).limit(1)
+            )
+            existing = existing_result.scalar_one_or_none()
 
-    async def _emit_event(self, run_id: str, strategy_id: str, step: str, title: str, message: str, progress: int, data: Optional[Dict[str, Any]] = None) -> None:
-        ev = StrategyRunEvent(run_id=run_id, strategy_id=strategy_id, step=step, title=title, message=message, progress=progress, data=data or {})
-        await get_mongo_db()[self.EVENTS].insert_one(ev.model_dump())
-
-    async def _update_run(self, run_id: str, strategy_id: str, user_id: str, update: Dict[str, Any]) -> None:
-        await get_mongo_db()[self.RUNS].update_one({"run_id": run_id, "strategy_id": strategy_id, "user_id": str(user_id)}, {"$set": update})
+            if existing:
+                existing.score = result.total_score
+                existing.reason = result.entry_reason
+                existing.updated_at = now
+            else:
+                sp = StrategyPool(
+                    stock_code=result.code,
+                    stock_name=result.name,
+                    status=result.status.value,
+                    score=result.total_score,
+                    reason=result.entry_reason,
+                    details={
+                        "strategy_id": strategy_id,
+                        "user_id": str(user_id),
+                        "signal_date": result.signal_date,
+                        "evidence": result.evidence,
+                    },
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(sp)
+            await session.commit()
 
     def _forward_return(self, rows: List[Dict[str, Any]], as_of_date: str, holding_days: int) -> Optional[float]:
         df = pd.DataFrame(rows)
@@ -413,7 +667,7 @@ class StrategyTaskService:
             by_signal_type=grouped,
         )
 
-    def _to_summary(self, doc: StrategyDefinition) -> StrategySummary:
+    def _to_summary(self, doc: StrategyDefinitionModel) -> StrategySummary:
         return StrategySummary(
             strategy_id=doc.strategy_id,
             name=doc.name,
@@ -427,14 +681,14 @@ class StrategyTaskService:
             updated_at=doc.updated_at,
         )
 
-    def _to_detail(self, doc: StrategyDefinition) -> StrategyDetail:
+    def _to_detail(self, doc: StrategyDefinitionModel) -> StrategyDetail:
         base = self._to_summary(doc).model_dump()
         return StrategyDetail(**base, markdown=doc.markdown, config=doc.parse_result.config)
 
-    def _to_run_response(self, run: StrategyRun) -> StrategyRunResponse:
+    def _to_run_response(self, run: StrategyRunModel) -> StrategyRunResponse:
         return StrategyRunResponse(**run.model_dump(exclude={"id", "cancel_requested"}))
 
-    def _to_backtest_response(self, bt: StrategyBacktest) -> StrategyBacktestResponse:
+    def _to_backtest_response(self, bt: StrategyBacktestModel) -> StrategyBacktestResponse:
         return StrategyBacktestResponse(**bt.model_dump(exclude={"id", "request"}))
 
 
@@ -451,14 +705,18 @@ def get_strategy_task_service() -> StrategyTaskService:
 async def run_enabled_strategy_jobs_once() -> None:
     """Hook for schedulers: create and run one job for each enabled strategy."""
     svc = get_strategy_task_service()
-    await svc.ensure_indexes()
-    db = get_mongo_db()
-    cursor = db[svc.STRATEGIES].find({"status": StrategyStatus.ENABLED.value})
-    async for doc in cursor:
-        strategy = StrategyDefinition.model_validate(doc)
-        created = await svc.create_run(strategy.strategy_id, strategy.user_id, run_type="scheduled")
-        if created:
-            asyncio.create_task(svc.run_task_background(strategy.strategy_id, created.run_id, strategy.user_id))
+    async with async_session_factory() as session:
+        result = await session.execute(
+            select(StrategyDefinition).where(StrategyDefinition.status == StrategyStatus.ENABLED.value)
+        )
+        docs = result.scalars().all()
+        for doc in docs:
+            config = doc.config or {}
+            sid = config.get("strategy_id", str(doc.id))
+            uid = config.get("user_id", "admin")
+            created = await svc.create_run(sid, uid, run_type="scheduled")
+            if created:
+                asyncio.create_task(svc.run_task_background(sid, created.run_id, uid))
 
 
 async def register_enabled_strategy_jobs(scheduler: Any, timezone: Any) -> None:
@@ -466,27 +724,38 @@ async def register_enabled_strategy_jobs(scheduler: Any, timezone: Any) -> None:
     from apscheduler.triggers.cron import CronTrigger
 
     svc = get_strategy_task_service()
-    await svc.ensure_indexes()
-    db = get_mongo_db()
 
     for job in list(scheduler.get_jobs()):
         if job.id.startswith("strategy_daily_run_"):
             scheduler.remove_job(job.id)
 
-    cursor = db[svc.STRATEGIES].find({"status": StrategyStatus.ENABLED.value, "schedule.enabled": True})
-    async for doc in cursor:
-        strategy = StrategyDefinition.model_validate(doc)
-        job_id = f"strategy_daily_run_{strategy.strategy_id}"
-
-        async def _run_one(strategy_id: str = strategy.strategy_id, user_id: str = strategy.user_id) -> None:
-            created = await svc.create_run(strategy_id, user_id, run_type="scheduled")
-            if created:
-                await svc.run_task_background(strategy_id, created.run_id, user_id)
-
-        scheduler.add_job(
-            _run_one,
-            CronTrigger.from_crontab(strategy.schedule.cron, timezone=timezone),
-            id=job_id,
-            name=f"策略每日筛选与复盘 - {strategy.name}",
-            replace_existing=True,
+    async with async_session_factory() as session:
+        result = await session.execute(
+            select(StrategyDefinition).where(StrategyDefinition.status == StrategyStatus.ENABLED.value)
         )
+        docs = result.scalars().all()
+        for doc in docs:
+            config = doc.config or {}
+            sid = config.get("strategy_id", str(doc.id))
+            uid = config.get("user_id", "admin")
+            schedule_cfg = config.get("schedule", {})
+            cron_expr = schedule_cfg.get("cron", "0 18 * * 1-5")
+            enabled = schedule_cfg.get("enabled", True)
+
+            if not enabled:
+                continue
+
+            job_id = f"strategy_daily_run_{sid}"
+
+            async def _run_one(strategy_id: str = sid, user_id: str = uid) -> None:
+                created = await svc.create_run(strategy_id, user_id, run_type="scheduled")
+                if created:
+                    await svc.run_task_background(strategy_id, created.run_id, user_id)
+
+            scheduler.add_job(
+                _run_one,
+                CronTrigger.from_crontab(cron_expr, timezone=timezone),
+                id=job_id,
+                name=f"策略每日筛选与复盘 - {doc.name}",
+                replace_existing=True,
+            )

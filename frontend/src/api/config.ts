@@ -562,7 +562,6 @@ export const DATA_SOURCE_TYPES = {
   MONGODB: 'mongodb',
 
   // 中国市场数据源
-  TUSHARE: 'tushare',
   AKSHARE: 'akshare',
   // 专业数据源
   WIND: 'wind',

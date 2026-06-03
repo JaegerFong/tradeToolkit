@@ -19,7 +19,6 @@ from app.models.operation_log import ActionType
 try:
     from tradingagents.utils.logging_manager import get_logger
 except ImportError:
-    # 如果导入失败，使用标准日志
     import logging
     def get_logger(name: str) -> logging.Logger:
         return logging.getLogger(name)
@@ -68,39 +67,39 @@ class CreateUserRequest(BaseModel):
 
 async def get_current_user(authorization: Optional[str] = Header(default=None)) -> dict:
     """获取当前用户信息"""
-    logger.debug(f"🔐 认证检查开始")
-    logger.debug(f"📋 Authorization header: {authorization[:50] if authorization else 'None'}...")
+    logger.debug(f"认证检查开始")
+    logger.debug(f"Authorization header: {authorization[:50] if authorization else 'None'}...")
 
     if not authorization:
-        logger.warning("❌ 没有Authorization header")
+        logger.warning("没有Authorization header")
         raise HTTPException(status_code=401, detail="No authorization header")
 
     if not authorization.lower().startswith("bearer "):
-        logger.warning(f"❌ Authorization header格式错误: {authorization[:20]}...")
+        logger.warning(f"Authorization header格式错误: {authorization[:20]}...")
         raise HTTPException(status_code=401, detail="Invalid authorization format")
 
     token = authorization.split(" ", 1)[1]
-    logger.debug(f"🎫 提取的token长度: {len(token)}")
-    logger.debug(f"🎫 Token前20位: {token[:20]}...")
+    logger.debug(f"提取的token长度: {len(token)}")
+    logger.debug(f"Token前20位: {token[:20]}...")
 
     token_data = AuthService.verify_token(token)
-    logger.debug(f"🔍 Token验证结果: {token_data is not None}")
+    logger.debug(f"Token验证结果: {token_data is not None}")
 
     if not token_data:
-        logger.warning("❌ Token验证失败")
+        logger.warning("Token验证失败")
         raise HTTPException(status_code=401, detail="Invalid token")
 
     # 从数据库获取用户信息
     user = await user_service.get_user_by_username(token_data.sub)
     if not user:
-        logger.warning(f"❌ 用户不存在: {token_data.sub}")
+        logger.warning(f"用户不存在: {token_data.sub}")
         raise HTTPException(status_code=401, detail="User not found")
 
     if not user.is_active:
-        logger.warning(f"❌ 用户已禁用: {token_data.sub}")
+        logger.warning(f"用户已禁用: {token_data.sub}")
         raise HTTPException(status_code=401, detail="User is inactive")
 
-    logger.debug(f"✅ 认证成功，用户: {token_data.sub}")
+    logger.debug(f"认证成功，用户: {token_data.sub}")
 
     # 返回完整的用户信息，包括偏好设置
     return {
@@ -110,7 +109,7 @@ async def get_current_user(authorization: Optional[str] = Header(default=None)) 
         "name": user.username,
         "is_admin": user.is_admin,
         "roles": ["admin"] if user.is_admin else ["user"],
-        "preferences": user.preferences.model_dump() if user.preferences else {}
+        "preferences": user.preferences if user.preferences else {}
     }
 
 @router.post("/login")
@@ -122,12 +121,12 @@ async def login(payload: LoginRequest, request: Request):
     ip_address = request.client.host if request.client else "unknown"
     user_agent = request.headers.get("user-agent", "")
 
-    logger.info(f"🔐 登录请求 - 用户名: {payload.username}, IP: {ip_address}")
+    logger.info(f"登录请求 - 用户名: {payload.username}, IP: {ip_address}")
 
     try:
         # 验证输入
         if not payload.username or not payload.password:
-            logger.warning(f"❌ 登录失败 - 用户名或密码为空")
+            logger.warning(f"登录失败 - 用户名或密码为空")
             await log_operation(
                 user_id="unknown",
                 username=payload.username or "unknown",
@@ -142,15 +141,15 @@ async def login(payload: LoginRequest, request: Request):
             )
             raise HTTPException(status_code=400, detail="用户名和密码不能为空")
 
-        logger.info(f"🔍 开始认证用户: {payload.username}")
+        logger.info(f"开始认证用户: {payload.username}")
 
         # 使用数据库认证
         user = await user_service.authenticate_user(payload.username, payload.password)
 
-        logger.info(f"🔍 认证结果: user={'存在' if user else '不存在'}")
+        logger.info(f"认证结果: user={'存在' if user else '不存在'}")
 
         if not user:
-            logger.warning(f"❌ 登录失败 - 用户名或密码错误: {payload.username}")
+            logger.warning(f"登录失败 - 用户名或密码错误: {payload.username}")
             await log_operation(
                 user_id="unknown",
                 username=payload.username,
@@ -167,7 +166,7 @@ async def login(payload: LoginRequest, request: Request):
 
         # 生成 token
         token = AuthService.create_access_token(sub=user.username)
-        refresh_token = AuthService.create_access_token(sub=user.username, expires_delta=60*60*24*7)  # 7天有效期
+        refresh_token = AuthService.create_access_token(sub=user.username, expires_delta=60*60*24*7)
 
         # 记录登录成功日志
         await log_operation(
@@ -201,7 +200,7 @@ async def login(payload: LoginRequest, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ 登录异常: {e}")
+        logger.error(f"登录异常: {e}")
         await log_operation(
             user_id="unknown",
             username=payload.username or "unknown",
@@ -220,34 +219,34 @@ async def login(payload: LoginRequest, request: Request):
 async def refresh_token(payload: RefreshTokenRequest):
     """刷新访问令牌"""
     try:
-        logger.debug(f"🔄 收到refresh token请求")
-        logger.debug(f"📝 Refresh token长度: {len(payload.refresh_token) if payload.refresh_token else 0}")
+        logger.debug(f"收到refresh token请求")
+        logger.debug(f"Refresh token长度: {len(payload.refresh_token) if payload.refresh_token else 0}")
 
         if not payload.refresh_token:
-            logger.warning("❌ Refresh token为空")
+            logger.warning("Refresh token为空")
             raise HTTPException(status_code=401, detail="Refresh token is required")
 
         # 验证refresh token
         token_data = AuthService.verify_token(payload.refresh_token)
-        logger.debug(f"🔍 Token验证结果: {token_data is not None}")
+        logger.debug(f"Token验证结果: {token_data is not None}")
 
         if not token_data:
-            logger.warning("❌ Refresh token验证失败")
+            logger.warning("Refresh token验证失败")
             raise HTTPException(status_code=401, detail="Invalid refresh token")
 
         # 验证用户是否仍然存在且激活
         user = await user_service.get_user_by_username(token_data.sub)
         if not user or not user.is_active:
-            logger.warning(f"❌ 用户不存在或已禁用: {token_data.sub}")
+            logger.warning(f"用户不存在或已禁用: {token_data.sub}")
             raise HTTPException(status_code=401, detail="User not found or inactive")
 
-        logger.debug(f"✅ Token验证成功，用户: {token_data.sub}")
+        logger.debug(f"Token验证成功，用户: {token_data.sub}")
 
         # 生成新的tokens
         new_token = AuthService.create_access_token(sub=token_data.sub)
         new_refresh_token = AuthService.create_access_token(sub=token_data.sub, expires_delta=60*60*24*7)
 
-        logger.debug(f"🎉 新token生成成功")
+        logger.debug(f"新token生成成功")
 
         return {
             "success": True,
@@ -261,7 +260,7 @@ async def refresh_token(payload: RefreshTokenRequest):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Refresh token处理异常: {str(e)}")
+        logger.error(f"Refresh token处理异常: {str(e)}")
         raise HTTPException(status_code=401, detail=f"Token refresh failed: {str(e)}")
 
 @router.post("/logout")
@@ -327,25 +326,16 @@ async def update_me(
 
         # 更新偏好设置（支持部分更新）
         if "preferences" in payload:
-            # 获取当前偏好
             current_prefs = user.get("preferences", {})
-
-            # 合并新的偏好设置
             merged_prefs = {**current_prefs, **payload["preferences"]}
-
-            # 创建 UserPreferences 对象
             update_data["preferences"] = UserPreferences(**merged_prefs)
 
         # 如果有语言设置，更新到偏好中
         if "language" in payload:
             if "preferences" not in update_data:
-                # 获取当前偏好
                 current_prefs = user.get("preferences", {})
                 update_data["preferences"] = UserPreferences(**current_prefs)
             update_data["preferences"].language = payload["language"]
-
-        # 如果有时区设置，更新到偏好中（如果需要）
-        # 注意：时区通常是系统级设置，不是用户级设置
 
         # 调用服务更新用户
         user_update = UserUpdate(**update_data)
@@ -354,7 +344,6 @@ async def update_me(
         if not updated_user:
             raise HTTPException(status_code=400, detail="更新失败，邮箱可能已被使用")
 
-        # 返回更新后的用户信息
         return {
             "success": True,
             "data": updated_user.model_dump(by_alias=True),
@@ -374,13 +363,12 @@ async def change_password(
 ):
     """修改密码"""
     try:
-        # 使用数据库服务修改密码
         success = await user_service.change_password(
-            user["username"], 
-            payload.old_password, 
+            user["username"],
+            payload.old_password,
             payload.new_password
         )
-        
+
         if not success:
             raise HTTPException(status_code=400, detail="旧密码错误")
 
@@ -403,13 +391,11 @@ async def reset_password(
 ):
     """重置密码（管理员操作）"""
     try:
-        # 检查权限
         if not user.get("is_admin", False):
             raise HTTPException(status_code=403, detail="权限不足")
 
-        # 重置密码
         success = await user_service.reset_password(payload.username, payload.new_password)
-        
+
         if not success:
             raise HTTPException(status_code=404, detail="用户不存在")
 
@@ -432,32 +418,31 @@ async def create_user(
 ):
     """创建用户（管理员操作）"""
     try:
-        # 检查权限
         if not user.get("is_admin", False):
             raise HTTPException(status_code=403, detail="权限不足")
 
-        # 创建用户
         user_create = UserCreate(
             username=payload.username,
             email=payload.email,
             password=payload.password
         )
-        
+
         new_user = await user_service.create_user(user_create)
-        
+
         if not new_user:
             raise HTTPException(status_code=400, detail="用户名或邮箱已存在")
 
-        # 如果需要设置为管理员
+        # 如果需要设置为管理员，通过 user_service 更新
         if payload.is_admin:
-            from pymongo import MongoClient
-            from app.core.config import settings
-            client = MongoClient(settings.MONGO_URI)
-            db = client[settings.MONGO_DB]
-            db.users.update_one(
-                {"username": payload.username},
-                {"$set": {"is_admin": True}}
-            )
+            from app.core.database import async_session_factory
+            from app.core.pg_models import User
+            from sqlalchemy import update as sql_update
+
+            async with async_session_factory() as session:
+                await session.execute(
+                    sql_update(User).where(User.username == payload.username).values(is_admin=True)
+                )
+                await session.commit()
 
         return {
             "success": True,
@@ -483,16 +468,15 @@ async def list_users(
 ):
     """获取用户列表（管理员操作）"""
     try:
-        # 检查权限
         if not user.get("is_admin", False):
             raise HTTPException(status_code=403, detail="权限不足")
 
         users = await user_service.list_users(skip=skip, limit=limit)
-        
+
         return {
             "success": True,
             "data": {
-                "users": [user.model_dump() for user in users],
+                "users": [u.model_dump() for u in users],
                 "total": len(users)
             },
             "message": "获取用户列表成功"

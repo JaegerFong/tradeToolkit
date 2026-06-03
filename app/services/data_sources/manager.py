@@ -7,8 +7,8 @@ from datetime import datetime, timedelta
 import pandas as pd
 
 from .base import DataSourceAdapter
-from .tushare_adapter import TushareAdapter
 from .akshare_adapter import AKShareAdapter
+from .tdx_adapter import TDXAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +23,8 @@ class DataSourceManager:
 
     def __init__(self):
         self.adapters: List[DataSourceAdapter] = [
-            TushareAdapter(),
             AKShareAdapter(),
+            TDXAdapter(),
         ]
 
         # 从数据库加载优先级配置
@@ -43,7 +43,7 @@ class DataSourceManager:
     def _load_priority_from_database(self):
         """从数据库加载数据源优先级配置（从 datasource_groupings 集合读取 A股市场的优先级）"""
         try:
-            from app.core.database import get_mongo_db_sync
+            from app.core.pg_adapter import get_pg_db as get_mongo_db_sync
             db = get_mongo_db_sync()
             groupings_collection = db.datasource_groupings
 
